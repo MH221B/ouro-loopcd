@@ -7,3 +7,4 @@ models/ouro/*.gguf
 models/ouro/*.safetensors
 models/ouro/*.bin
 tests/reference/out/
+tests/eval/out/

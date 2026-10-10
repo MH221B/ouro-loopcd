@@ -1,0 +1,8 @@
+{
+  "configs": [
+    { "name": "f32_clean", "model": "models/ouro/ouro.f32.gguf", "device": "cpu", "kv_type": "f32",
+      "note": "low-noise: the only configuration where LoopCD-Hidden is meaningful" },
+    { "name": "shipping", "model": "models/ouro/ouro.Q4_K_M.gguf", "device": "vulkan", "kv_type": "q8_0",
+      "note": "shipping stack; LoopCD-Hidden degenerates here (M3 finding)" }
+  ]
+}
