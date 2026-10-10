@@ -5,7 +5,7 @@ C++ on top of [ggml](https://github.com/ggml-org/ggml), running on one machine's
 AMD Radeon 890M iGPU through Vulkan, serving an OpenAI-compatible chat endpoint.
 
 It is not a llama.cpp fork. It links ggml and copies a few specific pieces from
-llama.cpp PR #29823, the PR that added Ouro support: the Ouro graph, the Ouro GGUF
+[llama.cpp PR #29823](https://github.com/ggml-org/llama.cpp/pull/29823), the PR that added Ouro support: the Ouro graph, the Ouro GGUF
 converter, and the BPE tokenizer. The engine handles one architecture, Ouro, and one model.
 
 I built it to check a paper's claim on my own hardware instead of taking it on faith,
@@ -16,7 +16,7 @@ and to measure what the technique costs to actually run.
 Ouro is a looped transformer. Instead of 192 distinct layers it has 48 layers applied
 4 times, reusing the same weights each pass, so the reasoning happens inside the loop
 rather than in emitted chain-of-thought tokens. It comes from
-*Scaling Latent Reasoning via Looped Language Models*, ByteDance Seed, arXiv 2510.25741,
+*Scaling Latent Reasoning via Looped Language Models*, ByteDance Seed, [arXiv 2510.25741](https://arxiv.org/abs/2510.25741),
 and the model here is [`ByteDance/Ouro-2.6B-Thinking`](https://huggingface.co/ByteDance/Ouro-2.6B-Thinking).
 
 The loop is also what makes the next part possible. At any decode step the model has
@@ -38,7 +38,7 @@ z' = lm_head(output_norm(g_R + ω · (g_R − g_1)))   # LoopCD-Hidden
 ```
 
 The technique is from *Decoding Looped Transformers Better for (Almost) Free*, Apple,
-arXiv 2610.02185. The "almost free" claim is about a fixed loop count, where LoopCD adds
+[arXiv 2610.02185](https://arxiv.org/abs/2610.02185). The "almost free" claim is about a fixed loop count, where LoopCD adds
 a second `lm_head` pass in logits mode and nothing at all in hidden mode, no extra depth.
 The paper's larger computational claim is the reduced-depth regime: run fewer loops, take
 some accuracy loss, and let LoopCD recover it, cutting FLOPs by roughly 22 to 48 percent.
@@ -143,7 +143,7 @@ python tools/convert_ouro.py                 # safetensors -> ouro.f16.gguf, arc
 llama-quantize.exe models/ouro/ouro.f16.gguf models/ouro/ouro.Q4_K_M.gguf Q4_K_M
 ```
 
-The quantize step needs the Ouro-aware build, which is llama.cpp PR #29823. Upstream
+The quantize step needs the Ouro-aware build, which is [llama.cpp PR #29823](https://github.com/ggml-org/llama.cpp/pull/29823). Upstream
 `llama-quantize` rejects `arch="ouro"`.
 
 ## Run
@@ -197,7 +197,7 @@ not a glance at the output.
 
 ## References
 
-- *Scaling Latent Reasoning via Looped Language Models*, ByteDance Seed, arXiv 2510.25741
-- *Decoding Looped Transformers Better for (Almost) Free*, Apple, arXiv 2610.02185
-- llama.cpp PR #29823, the Ouro architecture and converter
+- *Scaling Latent Reasoning via Looped Language Models*, ByteDance Seed, [arXiv 2510.25741](https://arxiv.org/abs/2510.25741)
+- *Decoding Looped Transformers Better for (Almost) Free*, Apple, [arXiv 2610.02185](https://arxiv.org/abs/2610.02185)
+- [llama.cpp PR #29823](https://github.com/ggml-org/llama.cpp/pull/29823), the Ouro architecture and converter
 - [ggml](https://github.com/ggml-org/ggml)
