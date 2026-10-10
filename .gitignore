@@ -1,0 +1,9 @@
+build/
+build-*/
+out/
+__pycache__/
+*.pyc
+models/ouro/*.gguf
+models/ouro/*.safetensors
+models/ouro/*.bin
+tests/reference/out/
