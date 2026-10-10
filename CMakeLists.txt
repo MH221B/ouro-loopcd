@@ -34,6 +34,7 @@ add_executable(loopcd
     src/main.cpp
     src/model.cpp
     src/graph.cpp
+    src/kv_cache.cpp
 )
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)
