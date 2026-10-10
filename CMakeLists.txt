@@ -61,3 +61,8 @@ add_executable(test_loopcd tests/unit/test_loopcd.cpp src/loopcd.cpp)
 target_include_directories(test_loopcd PRIVATE src)
 target_link_libraries(test_loopcd PRIVATE ggml::ggml)
 add_test(NAME loopcd COMMAND test_loopcd)
+
+add_executable(test_sampling tests/unit/test_sampling.cpp src/sampling.cpp)
+target_include_directories(test_sampling PRIVATE src)
+target_link_libraries(test_sampling PRIVATE ggml::ggml)
+add_test(NAME sampling COMMAND test_sampling)
