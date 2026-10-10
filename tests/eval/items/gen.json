@@ -1,6 +1,6 @@
 [
-  { "id": "gen0", "max_tokens": 128, "enable_thinking": false, "checks": ["def fib", "return"],
+  { "id": "gen0", "max_tokens": 1024, "enable_thinking": false, "checks": ["def fib", "return"],
     "messages": [ { "role": "user", "content": "Write a Python function named fib that returns the n-th Fibonacci number (0-indexed). Respond with code only." } ] },
-  { "id": "gen1", "max_tokens": 32, "enable_thinking": false, "checks": ["2", "3", "5", "7", "11"],
+  { "id": "gen1", "max_tokens": 64, "enable_thinking": false, "checks": ["2", "3", "5", "7", "11"],
     "messages": [ { "role": "user", "content": "List the first five prime numbers, comma-separated, and nothing else." } ] }
 ]
