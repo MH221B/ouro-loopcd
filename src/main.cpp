@@ -87,6 +87,16 @@ static void dump_f32(const std::string & path, ggml_tensor * t) {
     f.write((const char *) buf.data(), (std::streamsize) (buf.size() * sizeof(float)));
 }
 
+// Escape backslashes/quotes so a Windows path is valid inside a JSON string.
+static std::string json_escape(const std::string & s) {
+    std::string o;
+    for (char c : s) {
+        if (c == '\\' || c == '"') o.push_back('\\');
+        o.push_back(c);
+    }
+    return o;
+}
+
 static int cmd_logits(int argc, char ** argv) {
     std::string model_path, tokens_str, tokens_file, dump;
     int loops = 0;
@@ -134,16 +144,17 @@ static int cmd_logits(int argc, char ** argv) {
         dump_f32(dump + ".h1.bin", out.h1);
         dump_f32(dump + ".hR.bin", out.hR);
         std::ofstream j(dump + ".meta.json");
+        const std::string d = json_escape(dump);
         j << "{\n";
         j << "  \"n_vocab\": " << V << ",\n";
         j << "  \"n_embd\": "  << H << ",\n";
         j << "  \"n_tokens\": " << n << ",\n";
         j << "  \"loops\": " << R << ",\n";
         j << "  \"tensors\": {\n";
-        j << "    \"zR\": {\"shape\": [" << V << ", " << n << "], \"file\": \"" << dump << ".zR.bin\"},\n";
-        j << "    \"z1\": {\"shape\": [" << V << ", " << n << "], \"file\": \"" << dump << ".z1.bin\"},\n";
-        j << "    \"h1\": {\"shape\": [" << H << ", " << n << "], \"file\": \"" << dump << ".h1.bin\"},\n";
-        j << "    \"hR\": {\"shape\": [" << H << ", " << n << "], \"file\": \"" << dump << ".hR.bin\"}\n";
+        j << "    \"zR\": {\"shape\": [" << V << ", " << n << "], \"file\": \"" << d << ".zR.bin\"},\n";
+        j << "    \"z1\": {\"shape\": [" << V << ", " << n << "], \"file\": \"" << d << ".z1.bin\"},\n";
+        j << "    \"h1\": {\"shape\": [" << H << ", " << n << "], \"file\": \"" << d << ".h1.bin\"},\n";
+        j << "    \"hR\": {\"shape\": [" << H << ", " << n << "], \"file\": \"" << d << ".hR.bin\"}\n";
         j << "  }\n}\n";
         printf("dumped to %s.*\n", dump.c_str());
     }
