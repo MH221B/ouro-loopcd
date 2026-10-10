@@ -59,6 +59,22 @@ if(WIN32)
     # cp-httplib 0.58.0 requires Windows 10+, and needs the Winsock import library.
     add_compile_definitions(_WIN32_WINNT=0x0A00)
     target_link_libraries(loopcd PRIVATE ws2_32)
+
+    # Toolchain quirk (winlibs GCC 16.2.0): the driver auto-appends a CRT
+    # `default-manifest.o` to every executable, which collides with the UTF-8
+    # activeCodePage manifest embedded via src/loopcd.rc ("multiple non-default
+    # manifests"). Patch the compiler's own specs at configure time to drop only
+    # that auto-append, keeping our manifest (and hence UTF-8 argv).
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        execute_process(COMMAND ${CMAKE_CXX_COMPILER} -dumpspecs
+                        OUTPUT_VARIABLE _gcc_specs RESULT_VARIABLE _specs_rc)
+        if(_specs_rc EQUAL 0)
+            string(REPLACE "%{!shared:%:if-exists(default-manifest.o%s)}" "" _gcc_specs "${_gcc_specs}")
+            set(_spec_file "${CMAKE_CURRENT_BINARY_DIR}/no-default-manifest.spec")
+            file(WRITE "${_spec_file}" "${_gcc_specs}")
+            target_link_options(loopcd PRIVATE "-specs=${_spec_file}")
+        endif()
+    endif()
 endif()
 
 enable_testing()
