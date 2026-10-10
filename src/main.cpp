@@ -2,6 +2,7 @@
 #include "graph.h"
 #include "loopcd.h"
 #include "tokenizer.h"
+#include "chat_template.h"
 #include "ggml-backend.h"
 
 #include <cstdio>
@@ -124,6 +125,7 @@ static int loopcd_guided_argmax(ouro_model & m, const ouro_loopcd_params & lp, o
 static int cmd_logits(int argc, char ** argv);
 static int cmd_run(int argc, char ** argv);
 static int cmd_tokenize(int argc, char ** argv);
+static int cmd_render(int argc, char ** argv);
 
 static int cmd_inspect(const std::string & model_path, const std::string & device) {
     ouro_model m;
@@ -180,6 +182,10 @@ int main(int argc, char ** argv) {
 
     if (cmd == "tokenize") {
         return cmd_tokenize(argc - 2, argv + 2);
+    }
+
+    if (cmd == "render") {
+        return cmd_render(argc - 2, argv + 2);
     }
 
     fprintf(stderr, "error: unknown command '%s'\n", cmd.c_str());
@@ -456,5 +462,25 @@ static int cmd_tokenize(int argc, char ** argv) {
     printf("ids:");
     for (size_t i = 0; i < ids.size(); ++i) printf("%s%d", i ? "," : "", ids[i]);
     printf("\n");
+    return 0;
+}
+
+static int cmd_render(int argc, char ** argv) {
+    std::vector<ouro_chat_message> msgs;
+    bool no_think = false;
+    int add_gen = 1;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--msg") {
+            const std::string v = arg_value(argc, argv, i);
+            const size_t eq = v.find('=');
+            if (eq == std::string::npos) { fprintf(stderr, "error: --msg must be role=content\n"); return 1; }
+            msgs.push_back({ v.substr(0, eq), v.substr(eq + 1) });
+        } else if (a == "--no-generation-prompt") add_gen = 0;
+        else if (a == "--no-think")               no_think = true;
+        else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
+    }
+    if (msgs.empty()) { fprintf(stderr, "usage: loopcd render --msg role=content [--msg ...] [--no-think]\n"); return 1; }
+    printf("%s", ouro_render_chat(msgs, add_gen != 0, !no_think).c_str());
     return 0;
 }

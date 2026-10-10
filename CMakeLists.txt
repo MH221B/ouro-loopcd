@@ -39,6 +39,7 @@ add_executable(loopcd
     src/unicode.cpp
     src/unicode-data.cpp
     src/tokenizer.cpp
+    src/chat_template.cpp
 )
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)
