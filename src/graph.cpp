@@ -126,8 +126,10 @@ bool ouro_forward_kv(ouro_model & m, ouro_kv_cache & kv, const std::vector<int32
         }
 
         // Pre-norm tap: the layer-stack output before output_norm (used by LoopCD-Hidden).
-        if (j == 0)     g1 = x;
-        if (j == R - 1) gR = x;
+        // Marked as an output so ggml does not run the following RMSNorm in place and clobber it
+        // (ggml_op_can_inplace(RMS_NORM) is true; ggml-alloc only skips reuse for output tensors).
+        if (j == 0)     { g1 = x; ggml_set_output(g1); }
+        if (j == R - 1) { gR = x; ggml_set_output(gR); }
 
         // The reference applies model.norm at the end of every loop, including the last.
         x = rms_norm(ctx, x, m.output_norm, hp.eps);
