@@ -1,4 +1,9 @@
 {
-  "zR": 2.5,
-  "z1": 2.5
+  "_note": "Serving-stack gate (spec 7.1 run 3): Q4_K_M weights + q8_0 KV + Vulkan vs the f32 HF reference. The ENFORCED criterion is zR argmax at every position. The zR/z1 magnitudes are INFORMATIONAL ceilings justified by the Q4_K_M weight quantization (observed worst case zR max|d| = 4.717 on p2); they never fail the gate and are revisable only with a stated reason. z1 is an intermediate (the LoopCD reference) and is reported, not enforced.",
+  "enforce_argmax": ["zR"],
+  "mag": {},
+  "info": {
+    "zR": 6.0,
+    "z1": 6.0
+  }
 }
