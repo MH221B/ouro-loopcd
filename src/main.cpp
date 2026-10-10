@@ -205,7 +205,91 @@ static int cmd_logits(int argc, char ** argv) {
 }
 
 static int cmd_run(int argc, char ** argv) {
-    (void) argc; (void) argv;
-    fprintf(stderr, "run: not implemented yet\n");
-    return 1;
+    std::string model_path, tokens_str, tokens_file, dump_ids, device = "vulkan", kv_str = "q8_0";
+    int loops = 0, ctx = 4096, max_tokens = 32, eos = 2;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        if      (a == "-m" || a == "--model")  model_path  = arg_value(argc, argv, i);
+        else if (a == "--tokens")              tokens_str  = arg_value(argc, argv, i);
+        else if (a == "--tokens-file")         tokens_file = arg_value(argc, argv, i);
+        else if (a == "--loops")               loops       = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--ctx")                 ctx         = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--device")              device      = arg_value(argc, argv, i);
+        else if (a == "--kv-type")             kv_str      = arg_value(argc, argv, i);
+        else if (a == "--max-tokens")          max_tokens  = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--eos")                 eos         = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--dump-ids")            dump_ids    = arg_value(argc, argv, i);
+        else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
+    }
+    if (model_path.empty()) {
+        fprintf(stderr, "usage: loopcd run -m <model.gguf> (--tokens a,b,c | --tokens-file f) "
+                        "[--device cpu|vulkan] [--kv-type q8_0|f16] [--ctx N] [--loops N] "
+                        "[--max-tokens N] [--eos N] [--dump-ids file]\n");
+        return 1;
+    }
+
+    std::vector<int32_t> prompt = !tokens_file.empty() ? read_tokens_file(tokens_file) : parse_token_list(tokens_str);
+    if (prompt.empty()) { fprintf(stderr, "error: no tokens\n"); return 1; }
+    if (max_tokens <= 0) { fprintf(stderr, "error: --max-tokens must be > 0\n"); return 1; }
+
+    ouro_model m;
+    std::string err;
+    if (!ouro_backend_init(m, device, err))   { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!ouro_model_load(model_path, m, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    const int R = loops > 0 ? loops : m.hp.n_loops;
+    const ggml_type kv_type = parse_kv_type(kv_str, err);
+    if (!err.empty()) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    if ((int) prompt.size() + max_tokens > ctx) {
+        fprintf(stderr, "error: ctx=%d too small for %d prompt + %d generated tokens\n",
+                ctx, (int) prompt.size(), max_tokens);
+        return 1;
+    }
+
+    ouro_kv_cache kv;
+    if (!ouro_kv_cache_init(kv, m.backend, m.hp.n_embd_head, m.hp.n_head_kv, ctx,
+                            m.hp.n_layer * R, kv_type, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+    }
+
+    ouro_graph_outputs out;
+
+    // prefill: fill all 192 slots' rows [0, prompt.size())
+    const int64_t t_pre0 = ggml_time_us();
+    if (!ouro_forward_kv(m, kv, prompt, /*n_past=*/0, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    const int64_t t_pre1 = ggml_time_us();
+
+    std::vector<int32_t> gen;
+    gen.push_back(argmax_col(out.zR, (int) prompt.size() - 1));
+
+    // decode: one graph compute per token, appending K/V and advancing n_past
+    int n_past = (int) prompt.size();
+    const int64_t t_dec0 = ggml_time_us();
+    while ((int) gen.size() < max_tokens && gen.back() != eos && n_past < ctx) {
+        std::vector<int32_t> one = { gen.back() };
+        if (!ouro_forward_kv(m, kv, one, n_past, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        n_past += 1;
+        gen.push_back(argmax_col(out.zR, 0));
+    }
+    const int64_t t_dec1 = ggml_time_us();
+
+    const double pre_s = (t_pre1 - t_pre0) / 1e6;
+    const double dec_s = (t_dec1 - t_dec0) / 1e6;
+    printf("device=%s kv=%s loops=%d n_prompt=%d ctx=%d\n", device.c_str(), kv_str.c_str(), R, (int) prompt.size(), ctx);
+    printf("gen_ids:");
+    for (size_t i = 0; i < gen.size(); ++i) printf("%s%d", i ? "," : "", gen[i]);
+    printf("\n");
+    printf("prefill: %d tok in %.2fs (%.2f tok/s)\n", (int) prompt.size(), pre_s, prompt.size() / (pre_s > 0 ? pre_s : 1e-9));
+    printf("decode : %d tok in %.2fs (%.2f tok/s)\n", (int) gen.size(), dec_s, gen.size() / (dec_s > 0 ? dec_s : 1e-9));
+
+    if (!dump_ids.empty()) {
+        std::ofstream f(dump_ids);
+        for (size_t i = 0; i < gen.size(); ++i) f << (i ? "," : "") << gen[i];
+        f << "\n";
+    }
+
+    ouro_kv_cache_free(kv);
+    ouro_model_free(m);
+    return 0;
 }
