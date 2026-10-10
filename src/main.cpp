@@ -64,7 +64,7 @@ static bool parse_kitty_flags(int argc, char ** argv, ouro_kitty_config & c, std
     }
     if (c.kbits < 1 || c.kbits > 8 || c.vbits < 1 || c.vbits > 8 || c.boost_bits < c.kbits)
         { err = "kitty: bad bit widths"; return false; }
-    if (c.page % 128 != 0) { err = "kitty: page must be a multiple of 128"; return false; }
+    if (c.page <= 0) { err = "kitty: page must be > 0"; return false; }
     return true;
 }
 

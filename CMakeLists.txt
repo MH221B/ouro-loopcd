@@ -98,6 +98,12 @@ target_include_directories(test_sampling PRIVATE src)
 target_link_libraries(test_sampling PRIVATE ggml::ggml)
 add_test(NAME sampling COMMAND test_sampling)
 
+add_executable(test_kitty tests/unit/test_kitty.cpp src/kv_cache.cpp src/kitty_kv.cpp)
+target_include_directories(test_kitty PRIVATE src)
+target_link_libraries(test_kitty PRIVATE ggml::ggml)
+add_test(NAME kitty COMMAND test_kitty)
+set_tests_properties(kitty PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+
 add_executable(test_tokenizer tests/unit/test_tokenizer.cpp src/tokenizer.cpp src/unicode.cpp src/unicode-data.cpp)
 target_include_directories(test_tokenizer PRIVATE src)
 target_link_libraries(test_tokenizer PRIVATE ggml::ggml)

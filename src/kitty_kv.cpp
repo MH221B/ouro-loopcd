@@ -39,7 +39,7 @@ bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
     if (!kv.kitty) return true;
     const auto & c = kv.kitty_cfg;
     const int H = kv.n_head_kv, D = kv.head_dim, E = kv.n_embd_kv, ctx = kv.n_ctx, S = kv.n_slots;
-    if (c.page % 128 != 0) { err = "kitty: page must be a multiple of 128"; return false; }
+    if (c.page <= 0) { err = "kitty: page must be > 0"; return false; }
 
     std::mt19937_64 rng(c.seed);
     auto row_bytes = [&]() { return (size_t) E * sizeof(ggml_fp16_t); };
