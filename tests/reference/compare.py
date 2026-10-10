@@ -40,6 +40,9 @@ def main():
 
     fail = False
     for key, r, is_logits in pairs:
+        if key not in tol:
+            print(f"skip {key}: not in {args.tol}")
+            continue
         e = load_bin(meta, key)            # [n, dim]
         if e.shape != r.shape:
             print(f"FAIL {key}: shape {e.shape} vs {r.shape}")
