@@ -42,6 +42,8 @@ add_executable(loopcd
     src/chat_template.cpp
     src/generate.cpp
     src/sampling.cpp
+    src/server.cpp
+    third_party/cpp-httplib/httplib.cpp
 )
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)

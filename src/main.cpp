@@ -5,6 +5,7 @@
 #include "chat_template.h"
 #include "generate.h"
 #include "sampling.h"
+#include "server.h"
 #include "ggml-backend.h"
 
 #include <cstdio>
@@ -74,6 +75,7 @@ static int cmd_logits(int argc, char ** argv);
 static int cmd_run(int argc, char ** argv);
 static int cmd_tokenize(int argc, char ** argv);
 static int cmd_render(int argc, char ** argv);
+static int cmd_serve(int argc, char ** argv);
 
 static int cmd_inspect(const std::string & model_path, const std::string & device) {
     ouro_model m;
@@ -134,6 +136,10 @@ int main(int argc, char ** argv) {
 
     if (cmd == "render") {
         return cmd_render(argc - 2, argv + 2);
+    }
+
+    if (cmd == "serve") {
+        return cmd_serve(argc - 2, argv + 2);
     }
 
     fprintf(stderr, "error: unknown command '%s'\n", cmd.c_str());
@@ -433,4 +439,63 @@ static int cmd_render(int argc, char ** argv) {
     if (msgs.empty()) { fprintf(stderr, "usage: loopcd render --msg role=content [--msg ...] [--no-think]\n"); return 1; }
     printf("%s", ouro_render_chat(msgs, add_gen != 0, !no_think).c_str());
     return 0;
+}
+
+static int cmd_serve(int argc, char ** argv) {
+    ouro_server_config cfg;
+    std::string loopcd_str = "logits", loopcd_preset = "generation";
+    bool omega_set = false, omega_max_set = false, loopcd_adaptive = false;
+    float omega = 0.0f, omega_max = 0.0f;
+    int loopcd_ref = 1;
+
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        if      (a == "-m" || a == "--model")  cfg.model_path = arg_value(argc, argv, i);
+        else if (a == "--device")              cfg.device     = arg_value(argc, argv, i);
+        else if (a == "--kv-type")             cfg.kv_type    = arg_value(argc, argv, i);
+        else if (a == "--ctx")                 cfg.ctx        = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--loops")               cfg.loops      = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--eos")                 cfg.eos        = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--host")                cfg.host       = arg_value(argc, argv, i);
+        else if (a == "--port")                cfg.port       = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--temp")                cfg.sampling.temp           = (float) std::atof(arg_value(argc, argv, i).c_str());
+        else if (a == "--top-k")               cfg.sampling.top_k          = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--top-p")               cfg.sampling.top_p          = (float) std::atof(arg_value(argc, argv, i).c_str());
+        else if (a == "--repeat-penalty")      cfg.sampling.repeat_penalty = (float) std::atof(arg_value(argc, argv, i).c_str());
+        else if (a == "--loopcd")              loopcd_str  = arg_value(argc, argv, i);
+        else if (a == "--loopcd-preset")       loopcd_preset = arg_value(argc, argv, i);
+        else if (a == "--loopcd-adaptive")     loopcd_adaptive = true;
+        else if (a == "--loopcd-omega")        { omega = (float) std::atof(arg_value(argc, argv, i).c_str()); omega_set = true; }
+        else if (a == "--loopcd-omega-max")    { omega_max = (float) std::atof(arg_value(argc, argv, i).c_str()); omega_max_set = true; }
+        else if (a == "--loopcd-ref")          loopcd_ref = std::atoi(arg_value(argc, argv, i).c_str());
+        else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
+    }
+    if (cfg.model_path.empty()) {
+        fprintf(stderr, "usage: loopcd serve -m <model.gguf> [--device cpu|vulkan] [--kv-type q8_0|f16|f32] "
+                        "[--ctx N] [--loops N] [--host H] [--port N] [--temp F] [--top-k N] [--top-p F] "
+                        "[--repeat-penalty F] [--loopcd off|logits|hidden] [--loopcd-preset generation|reasoning|mc] "
+                        "[--loopcd-omega F] [--loopcd-omega-max F] [--loopcd-adaptive] [--loopcd-ref N]\n");
+        return 1;
+    }
+
+    std::string lerr;
+    cfg.loopcd.mode = parse_loopcd_mode(loopcd_str, lerr);
+    if (!lerr.empty()) { fprintf(stderr, "error: %s\n", lerr.c_str()); return 1; }
+    float preset_omega = 0.3f, preset_cap = 1.0f;
+    if      (loopcd_preset == "generation") { preset_omega = 0.3f; preset_cap = 1.0f; }
+    else if (loopcd_preset == "reasoning")  { preset_omega = 0.5f; preset_cap = 1.5f; }
+    else if (loopcd_preset == "mc")         { preset_omega = 0.5f; preset_cap = 1.0f; }
+    else { fprintf(stderr, "error: unknown --loopcd-preset '%s'\n", loopcd_preset.c_str()); return 1; }
+    cfg.loopcd.omega     = omega_set     ? omega     : (cfg.loopcd.mode == OURO_LOOPCD_HIDDEN ? 0.5f : preset_omega);
+    cfg.loopcd.omega_max = omega_max_set ? omega_max : preset_cap;
+    cfg.loopcd.adaptive  = loopcd_adaptive;
+    cfg.loopcd.ref_iter  = loopcd_ref;
+    // Keep the same hard rejections and exact messages as the landed M3 `run` command.
+    if (cfg.loopcd.mode == OURO_LOOPCD_HIDDEN && cfg.loopcd.adaptive) {
+        fprintf(stderr, "error: adaptive strength is LoopCD-Logits only (paper 3.2)\n"); return 1;
+    }
+    if (cfg.loopcd.mode != OURO_LOOPCD_OFF && cfg.loopcd.ref_iter != 1) {
+        fprintf(stderr, "error: only --loopcd-ref 1 is available (the M2 taps expose loop 1)\n"); return 1;
+    }
+    return ouro_serve(cfg);
 }
