@@ -43,3 +43,8 @@ enable_testing()
 add_executable(test_ops tests/unit/test_ops.cpp)
 target_link_libraries(test_ops PRIVATE ggml::ggml)
 add_test(NAME ops COMMAND test_ops)
+
+add_executable(test_kv tests/unit/test_kv.cpp src/kv_cache.cpp)
+target_include_directories(test_kv PRIVATE src)
+target_link_libraries(test_kv PRIVATE ggml::ggml)
+add_test(NAME kv COMMAND test_kv)
