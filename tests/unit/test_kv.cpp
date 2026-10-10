@@ -78,7 +78,7 @@ static void test_masked_attn() {
     ggml_backend_t cpu = ggml_backend_cpu_init();
     ouro_kv_cache kv;
     std::string err;
-    const bool ok = ouro_kv_cache_init(kv, cpu, hd, nh, n_ctx, n_slots, GGML_TYPE_F16, err);
+    const bool ok = ouro_kv_cache_init(kv, cpu, hd, nh, n_ctx, n_slots, GGML_TYPE_F16, nullptr, err);
     check("kv_cache_init f16", ok ? 1.0 : 0.0, 1.0, 0.0);
     if (!ok) { printf("err: %s\n", err.c_str()); g_fail = 1; ggml_backend_free(cpu); return; }
 

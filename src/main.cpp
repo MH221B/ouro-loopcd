@@ -41,12 +41,31 @@ static std::string arg_value(int argc, char ** argv, int & i) {
     return argv[++i];
 }
 
-static ggml_type parse_kv_type(const std::string & s, std::string & err) {
-    if (s == "q8_0" || s == "q8") return GGML_TYPE_Q8_0;
-    if (s == "f16")               return GGML_TYPE_F16;
-    if (s == "f32")               return GGML_TYPE_F32;
-    err = "unknown --kv-type '" + s + "' (use q8_0, f16 or f32)";
-    return GGML_TYPE_Q8_0;
+static bool parse_kv(const std::string & s, ggml_type & type, bool & kitty, std::string & err) {
+    if (s == "q8_0" || s == "q8") { type = GGML_TYPE_Q8_0; kitty = false; return true; }
+    if (s == "f16")               { type = GGML_TYPE_F16;  kitty = false; return true; }
+    if (s == "f32")               { type = GGML_TYPE_F32;  kitty = false; return true; }
+    if (s == "kitty")             { type = GGML_TYPE_F16;  kitty = true;  return true; }
+    err = "unknown --kv-type '" + s + "' (use q8_0, f16, f32 or kitty)";
+    return false;
+}
+
+static bool parse_kitty_flags(int argc, char ** argv, ouro_kitty_config & c, std::string & err) {
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if      (a == "--kitty-sink")         c.sink           = atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--kitty-page")         c.page           = atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--kitty-boost")        c.boost_channels = atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--kitty-kbits")        c.kbits          = atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--kitty-vbits")        c.vbits          = atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--kitty-boost-bits")   c.boost_bits     = atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--kitty-random")       c.random_select  = true;
+        else if (a == "--kitty-seed")         c.seed           = strtoull(arg_value(argc, argv, i).c_str(), nullptr, 10);
+    }
+    if (c.kbits < 1 || c.kbits > 8 || c.vbits < 1 || c.vbits > 8 || c.boost_bits < c.kbits)
+        { err = "kitty: bad bit widths"; return false; }
+    if (c.page % 128 != 0) { err = "kitty: page must be a multiple of 128"; return false; }
+    return true;
 }
 
 static int argmax_col(ggml_tensor * z, int col) {
@@ -180,7 +199,7 @@ static int cmd_logits(int argc, char ** argv) {
     }
     if (model_path.empty()) {
         fprintf(stderr, "usage: loopcd logits -m <model.gguf> (--tokens a,b,c | --tokens-file f) "
-                        "[--loops N] [--ctx N] [--device cpu|vulkan] [--kv-type q8_0|f16] [--dump prefix]\n");
+                        "[--loops N] [--ctx N] [--device cpu|vulkan] [--kv-type q8_0|f16|f32|kitty] [--dump prefix]\n");
         return 1;
     }
 
@@ -193,12 +212,14 @@ static int cmd_logits(int argc, char ** argv) {
     if (!ouro_model_load(model_path, m, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     const int R = loops > 0 ? loops : m.hp.n_loops;
-    const ggml_type kv_type = parse_kv_type(kv_str, err);
-    if (!err.empty()) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    ggml_type kv_type; bool kitty = false;
+    if (!parse_kv(kv_str, kv_type, kitty, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    ouro_kitty_config kcfg;                       // defaults are the kernel's
+    if (kitty && !parse_kitty_flags(argc, argv, kcfg, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     ouro_kv_cache kv;
     if (!ouro_kv_cache_init(kv, m.backend, m.hp.n_embd_head, m.hp.n_head_kv, ctx,
-                            m.hp.n_layer * R, kv_type, err)) {
+                            m.hp.n_layer * R, kv_type, kitty ? &kcfg : nullptr, err)) {
         fprintf(stderr, "error: %s\n", err.c_str()); return 1;
     }
 
@@ -278,9 +299,11 @@ static int cmd_run(int argc, char ** argv) {
     }
     if (model_path.empty()) {
         fprintf(stderr, "usage: loopcd run -m <model.gguf> (--tokens a,b,c | --tokens-file f) "
-                        "[--device cpu|vulkan] [--kv-type q8_0|f16|f32] [--ctx N] [--loops N] "
+                        "[--device cpu|vulkan] [--kv-type q8_0|f16|f32|kitty] [--ctx N] [--loops N] "
                         "[--max-tokens N] [--eos N] [--dump-ids file] [--temp F] [--top-k N] [--top-p F] "
                         "[--repeat-penalty F] [--repeat-last-n N] [--seed N] "
+                        "[--kitty-sink N] [--kitty-page N] [--kitty-boost N] [--kitty-kbits N] [--kitty-vbits N] "
+                        "[--kitty-boost-bits N] [--kitty-random] [--kitty-seed N] "
                         "[--loopcd off|logits|hidden] [--loopcd-preset generation|reasoning|mc] "
                         "[--loopcd-omega F] [--loopcd-omega-max F] [--loopcd-adaptive] [--loopcd-ref N] "
                         "[--dump-guided prefix]\n");
@@ -330,8 +353,10 @@ static int cmd_run(int argc, char ** argv) {
     if (!ouro_model_load(model_path, m, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     const int R = loops > 0 ? loops : m.hp.n_loops;
-    const ggml_type kv_type = parse_kv_type(kv_str, err);
-    if (!err.empty()) { fprintf(stderr, "error: %s\n", err.c_str()); ouro_model_free(m); return 1; }
+    ggml_type kv_type; bool kitty = false;
+    if (!parse_kv(kv_str, kv_type, kitty, err)) { fprintf(stderr, "error: %s\n", err.c_str()); ouro_model_free(m); return 1; }
+    ouro_kitty_config kcfg;
+    if (kitty && !parse_kitty_flags(argc, argv, kcfg, err)) { fprintf(stderr, "error: %s\n", err.c_str()); ouro_model_free(m); return 1; }
 
     if ((int) prompt.size() + max_tokens > ctx) {
         fprintf(stderr, "error: ctx=%d too small for %d prompt + %d generated tokens\n",
@@ -342,7 +367,7 @@ static int cmd_run(int argc, char ** argv) {
 
     ouro_kv_cache kv;
     if (!ouro_kv_cache_init(kv, m.backend, m.hp.n_embd_head, m.hp.n_head_kv, ctx,
-                            m.hp.n_layer * R, kv_type, err)) {
+                            m.hp.n_layer * R, kv_type, kitty ? &kcfg : nullptr, err)) {
         fprintf(stderr, "error: %s\n", err.c_str()); ouro_model_free(m); return 1;
     }
 
@@ -471,11 +496,23 @@ static int cmd_serve(int argc, char ** argv) {
         else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
     }
     if (cfg.model_path.empty()) {
-        fprintf(stderr, "usage: loopcd serve -m <model.gguf> [--device cpu|vulkan] [--kv-type q8_0|f16|f32] "
+        fprintf(stderr, "usage: loopcd serve -m <model.gguf> [--device cpu|vulkan] [--kv-type q8_0|f16|f32|kitty] "
                         "[--ctx N] [--loops N] [--host H] [--port N] [--temp F] [--top-k N] [--top-p F] "
+                        "[--kitty-sink N] [--kitty-page N] [--kitty-boost N] [--kitty-kbits N] [--kitty-vbits N] "
+                        "[--kitty-boost-bits N] [--kitty-random] [--kitty-seed N] "
                         "[--repeat-penalty F] [--loopcd off|logits|hidden] [--loopcd-preset generation|reasoning|mc] "
                         "[--loopcd-omega F] [--loopcd-omega-max F] [--loopcd-adaptive] [--loopcd-ref N]\n");
         return 1;
+    }
+
+    {
+        std::string kerr;
+        ggml_type ktype = GGML_TYPE_Q8_0; bool kitty = false;
+        if (!parse_kv(cfg.kv_type, ktype, kitty, kerr)) { fprintf(stderr, "error: %s\n", kerr.c_str()); return 1; }
+        cfg.kitty = kitty;
+        if (kitty && !parse_kitty_flags(argc, argv, cfg.kitty_cfg, kerr)) {
+            fprintf(stderr, "error: %s\n", kerr.c_str()); return 1;
+        }
     }
 
     std::string lerr;

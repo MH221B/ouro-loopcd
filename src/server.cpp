@@ -96,10 +96,12 @@ int ouro_serve(const ouro_server_config & cfg) {
     if (!ouro_tokenizer_load(st->tok, cfg.model_path, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     const int R = cfg.loops > 0 ? cfg.loops : st->m.hp.n_loops;
-    const ggml_type kv_type = cfg.kv_type == "f16" ? GGML_TYPE_F16
+    const bool kitty = cfg.kitty || cfg.kv_type == "kitty";
+    const ggml_type kv_type = (kitty || cfg.kv_type == "f16") ? GGML_TYPE_F16
                             : cfg.kv_type == "f32" ? GGML_TYPE_F32 : GGML_TYPE_Q8_0;
+    ouro_kitty_config kcfg = cfg.kitty_cfg;
     if (!ouro_kv_cache_init(st->kv, st->m.backend, st->m.hp.n_embd_head, st->m.hp.n_head_kv,
-                            cfg.ctx, st->m.hp.n_layer * R, kv_type, err)) {
+                            cfg.ctx, st->m.hp.n_layer * R, kv_type, kitty ? &kcfg : nullptr, err)) {
         fprintf(stderr, "error: %s\n", err.c_str()); return 1;
     }
 

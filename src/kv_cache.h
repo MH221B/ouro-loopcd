@@ -5,6 +5,18 @@
 
 #include <string>
 
+// M6 Kitty-KV config. nullptr (or kitty=false) means the cache is a plain f16/q8_0 cache.
+struct ouro_kitty_config {
+    int sink          = 32;   // leading tokens kept fp16
+    int page          = 128;  // page size for key quantization
+    int boost_channels= 0;    // 0 => head_dim//4, computed at init
+    int kbits         = 2;
+    int vbits         = 2;
+    int boost_bits    = 4;
+    bool random_select= false;
+    unsigned long long seed = 1234;
+};
+
 // The cached K/V for one logical layer occupies one slot, because K/V differ per loop.
 // Ouro has n_layer * n_loops slots (48 * 4 = 192); slot index = loop * n_layer + layer.
 //
@@ -23,12 +35,19 @@ struct ouro_kv_cache {
     ggml_backend_buffer_t buf = nullptr; // owns the k/v data
     ggml_tensor * k = nullptr;        // [n_embd_kv, n_ctx, n_slots]
     ggml_tensor * v = nullptr;        // [n_embd_kv, n_ctx, n_slots]
+
+    // M6: fake-quantize the f16 cache after each forward.
+    bool kitty = false;              // valid when kitty == true
+    ouro_kitty_config kitty_cfg{};
+    long long kitty_k_done = 0;      // positions whose K page is already quantized
+    long long kitty_v_done = 0;      // positions whose V is already quantized
 };
 
 // Allocates both cache tensors on `backend`. type must be GGML_TYPE_Q8_0, GGML_TYPE_F16 or GGML_TYPE_F32.
+// When `kitty` is non-null the cache is f16 storage with the Kitty quantizing write path enabled.
 bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
                         int head_dim, int n_head_kv, int n_ctx, int n_slots,
-                        ggml_type type, std::string & err);
+                        ggml_type type, const ouro_kitty_config * kitty, std::string & err);
 
 void ouro_kv_cache_free(ouro_kv_cache & kv);
 

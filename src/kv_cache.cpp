@@ -22,9 +22,18 @@ static ggml_tensor * kv_write_view(ggml_context * ctx, ggml_tensor * cache, ggml
 
 bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
                         int head_dim, int n_head_kv, int n_ctx, int n_slots,
-                        ggml_type type, std::string & err) {
-    if (type != GGML_TYPE_Q8_0 && type != GGML_TYPE_F16 && type != GGML_TYPE_F32) {
-        err = "kv cache type must be q8_0, f16 or f32";
+                        ggml_type type, const ouro_kitty_config * kitty, std::string & err) {
+    if (kitty) {
+        if (type != GGML_TYPE_F16) { err = "kitty kv requires --kv-type kitty (f16 storage)"; return false; }
+        kv.kitty = true;
+        kv.kitty_cfg = *kitty;
+        if (kv.kitty_cfg.boost_channels <= 0) kv.kitty_cfg.boost_channels = head_dim / 4;
+        if (kv.kitty_cfg.sink < 0) kv.kitty_cfg.sink = 0;
+        if (kv.kitty_cfg.page <= 0) kv.kitty_cfg.page = 128;
+        kv.kitty_k_done = kv.kitty_cfg.sink;
+        kv.kitty_v_done = kv.kitty_cfg.sink;
+    } else if (type != GGML_TYPE_Q8_0 && type != GGML_TYPE_F16 && type != GGML_TYPE_F32) {
+        err = "kv cache type must be q8_0, f16 or f32 (or --kv-type kitty)";
         return false;
     }
     kv.head_dim  = head_dim;
@@ -64,6 +73,10 @@ void ouro_kv_cache_free(ouro_kv_cache & kv) {
 
 void ouro_kv_cache_clear(ouro_kv_cache & kv) {
     if (kv.buf) ggml_backend_buffer_clear(kv.buf, 0);
+    if (kv.kitty) {
+        kv.kitty_k_done = kv.kitty_cfg.sink;
+        kv.kitty_v_done = kv.kitty_cfg.sink;
+    }
 }
 
 ggml_tensor * ouro_kv_k(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_kv) {
