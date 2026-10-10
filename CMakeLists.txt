@@ -36,6 +36,9 @@ add_executable(loopcd
     src/graph.cpp
     src/kv_cache.cpp
     src/loopcd.cpp
+    src/unicode.cpp
+    src/unicode-data.cpp
+    src/tokenizer.cpp
 )
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)
@@ -66,3 +69,8 @@ add_executable(test_sampling tests/unit/test_sampling.cpp src/sampling.cpp)
 target_include_directories(test_sampling PRIVATE src)
 target_link_libraries(test_sampling PRIVATE ggml::ggml)
 add_test(NAME sampling COMMAND test_sampling)
+
+add_executable(test_tokenizer tests/unit/test_tokenizer.cpp src/tokenizer.cpp src/unicode.cpp src/unicode-data.cpp)
+target_include_directories(test_tokenizer PRIVATE src)
+target_link_libraries(test_tokenizer PRIVATE ggml::ggml)
+add_test(NAME tokenizer COMMAND test_tokenizer ${CMAKE_SOURCE_DIR}/models/ouro/ouro.f16.gguf)

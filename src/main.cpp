@@ -1,6 +1,7 @@
 #include "model.h"
 #include "graph.h"
 #include "loopcd.h"
+#include "tokenizer.h"
 #include "ggml-backend.h"
 
 #include <cstdio>
@@ -122,6 +123,7 @@ static int loopcd_guided_argmax(ouro_model & m, const ouro_loopcd_params & lp, o
 
 static int cmd_logits(int argc, char ** argv);
 static int cmd_run(int argc, char ** argv);
+static int cmd_tokenize(int argc, char ** argv);
 
 static int cmd_inspect(const std::string & model_path, const std::string & device) {
     ouro_model m;
@@ -174,6 +176,10 @@ int main(int argc, char ** argv) {
 
     if (cmd == "run") {
         return cmd_run(argc - 2, argv + 2);
+    }
+
+    if (cmd == "tokenize") {
+        return cmd_tokenize(argc - 2, argv + 2);
     }
 
     fprintf(stderr, "error: unknown command '%s'\n", cmd.c_str());
@@ -417,5 +423,38 @@ static int cmd_run(int argc, char ** argv) {
 
     ouro_kv_cache_free(kv);
     ouro_model_free(m);
+    return 0;
+}
+
+static int cmd_tokenize(int argc, char ** argv) {
+    std::string model_path, text, ids_str;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        if      (a == "-m" || a == "--model") model_path = arg_value(argc, argv, i);
+        else if (a == "--text")               text       = arg_value(argc, argv, i);
+        else if (a == "--ids")                ids_str    = arg_value(argc, argv, i);
+        else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
+    }
+    if (model_path.empty()) {
+        fprintf(stderr, "usage: loopcd tokenize -m <model.gguf> --text \"...\" | --ids a,b,c\n");
+        return 1;
+    }
+
+    ouro_tokenizer tok;
+    std::string err;
+    if (!ouro_tokenizer_load(tok, model_path, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    if (!ids_str.empty()) {
+        std::vector<int32_t> ids = parse_token_list(ids_str);
+        const std::string out = ouro_detokenize(tok, ids, /*skip_special=*/false);
+        printf("%s\n", out.c_str());
+        return 0;
+    }
+
+    std::vector<int32_t> ids;
+    if (!ouro_tokenize(tok, text, /*add_special=*/false, ids, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    printf("ids:");
+    for (size_t i = 0; i < ids.size(); ++i) printf("%s%d", i ? "," : "", ids[i]);
+    printf("\n");
     return 0;
 }
