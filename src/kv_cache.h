@@ -18,14 +18,14 @@ struct ouro_kv_cache {
     int n_embd_kv   = 0;   // head_dim * n_head_kv = 2048
     int n_ctx       = 0;   // each slot is n_ctx rows tall
     int n_slots     = 0;   // 192
-    ggml_type type  = GGML_TYPE_Q8_0; // q8_0 (default) or f16
+    ggml_type type  = GGML_TYPE_Q8_0; // q8_0 (default), f16, or f32
     ggml_context * ctx = nullptr;     // owns the k/v tensor structs
     ggml_backend_buffer_t buf = nullptr; // owns the k/v data
     ggml_tensor * k = nullptr;        // [n_embd_kv, n_ctx, n_slots]
     ggml_tensor * v = nullptr;        // [n_embd_kv, n_ctx, n_slots]
 };
 
-// Allocates both cache tensors on `backend`. type must be GGML_TYPE_Q8_0 or GGML_TYPE_F16.
+// Allocates both cache tensors on `backend`. type must be GGML_TYPE_Q8_0, GGML_TYPE_F16 or GGML_TYPE_F32.
 bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
                         int head_dim, int n_head_kv, int n_ctx, int n_slots,
                         ggml_type type, std::string & err);
