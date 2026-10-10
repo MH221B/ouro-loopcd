@@ -1,0 +1,19 @@
+{
+  "strings": [
+    "The capital of France is",
+    "def fib(n):\n    if n < 2:\n        return n\n    return",
+    "Question: What is 17 * 23?\nAnswer:",
+    "Hello, world! 12345",
+    "  leading and trailing  ",
+    "Tab\tand\nnewline\n\n",
+    "café déjà vu — naïve",
+    "a<|im_end|>b",
+    "emoji: 😀🎉 and CJK: 你好世界"
+  ],
+  "conversations": [
+    { "messages": [ {"role": "user", "content": "Hi"} ], "enable_thinking": false },
+    { "messages": [ {"role": "system", "content": "You are terse."}, {"role": "user", "content": "Hi"} ], "enable_thinking": false },
+    { "messages": [ {"role": "user", "content": "Solve 2+2."} ], "enable_thinking": true },
+    { "messages": [ {"role": "user", "content": "One"}, {"role": "assistant", "content": "Two"}, {"role": "user", "content": "Three"} ], "enable_thinking": false }
+  ]
+}
