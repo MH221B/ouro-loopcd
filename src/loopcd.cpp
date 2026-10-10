@@ -1,4 +1,5 @@
 #include "loopcd.h"
+#include "graph.h"
 
 #include <cmath>
 #include <cstdint>
@@ -73,5 +74,37 @@ bool ouro_loopcd_hidden_head(ouro_model & m, const float * g, int n, std::vector
     ggml_backend_tensor_get(z, z_out.data(), 0, z_out.size() * sizeof(float));
 
     ggml_free(ctx);
+    return true;
+}
+
+static void tap_col(ggml_tensor * t, int col, std::vector<float> & dst) {
+    const int D = (int) t->ne[0];
+    dst.resize(D);
+    ggml_backend_tensor_get(t, dst.data(), (size_t) col * D * sizeof(float), D * sizeof(float));
+}
+
+bool ouro_loopcd_guided_logits(ouro_model & m, const ouro_loopcd_params & lp, ouro_graph_outputs & out,
+                               int col, std::vector<float> & z_out, std::string & err) {
+    const int V = m.hp.n_vocab;
+    const int H = m.hp.n_embd;
+
+    std::vector<float> zR, z1;
+    tap_col(out.zR, col, zR);
+    tap_col(out.z1, col, z1);   // read before any head pass can clobber the taps
+
+    if (lp.mode == OURO_LOOPCD_OFF) { z_out = zR; return true; }
+
+    if (lp.mode == OURO_LOOPCD_HIDDEN) {
+        std::vector<float> gR, g1;
+        tap_col(out.gR, col, gR);
+        tap_col(out.g1, col, g1);
+        std::vector<float> gp(H);
+        ouro_loopcd_combine_hidden(gR.data(), g1.data(), H, 1, lp.omega, gp.data());
+        return ouro_loopcd_hidden_head(m, gp.data(), 1, z_out, err);
+    }
+
+    const float omega = lp.adaptive ? ouro_loopcd_adaptive_omega(zR.data(), V, lp.omega_max) : lp.omega;
+    z_out.resize(V);
+    ouro_loopcd_combine_logits(zR.data(), z1.data(), V, 1, omega, z_out.data());
     return true;
 }

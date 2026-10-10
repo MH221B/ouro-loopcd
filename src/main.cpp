@@ -3,6 +3,8 @@
 #include "loopcd.h"
 #include "tokenizer.h"
 #include "chat_template.h"
+#include "generate.h"
+#include "sampling.h"
 #include "ggml-backend.h"
 
 #include <cstdio>
@@ -63,63 +65,9 @@ static ouro_loopcd_mode parse_loopcd_mode(const std::string & s, std::string & e
     return OURO_LOOPCD_OFF;
 }
 
-// Copy one column (token position) of a [dim, n_tokens] tap to host.
-static void tensor_col_to_host(ggml_tensor * t, int col, std::vector<float> & dst) {
-    const int D = (int) t->ne[0];
-    dst.resize(D);
-    ggml_backend_tensor_get(t, dst.data(), (size_t) col * D * sizeof(float), D * sizeof(float));
-}
-
-static int argmax_host(const std::vector<float> & v) {
-    int best = 0;
-    for (int i = 1; i < (int) v.size(); ++i) if (v[i] > v[best]) best = i;
-    return best;
-}
-
 static void dump_f32_vec(const std::string & path, const std::vector<float> & v) {
     std::ofstream f(path, std::ios::binary);
     f.write((const char *) v.data(), (std::streamsize) (v.size() * sizeof(float)));
-}
-
-// Applies the selected LoopCD mode to one token column and returns the guided argmax.
-// Reads zR and z1 up front (before any head pass can clobber the taps); the optional out
-// pointers receive z' / zR / z1 for the on-vs-off check. Returns -1 on error.
-static int loopcd_guided_argmax(ouro_model & m, const ouro_loopcd_params & lp, ouro_graph_outputs & out,
-                                int col, std::vector<float> * guided, std::vector<float> * unguided,
-                                std::vector<float> * ref1, std::string & err) {
-    const int V = m.hp.n_vocab;
-    const int H = m.hp.n_embd;
-
-    std::vector<float> zR, z1;
-    tensor_col_to_host(out.zR, col, zR);
-    tensor_col_to_host(out.z1, col, z1);            // read before the hidden head pass
-    if (unguided) *unguided = zR;
-    if (ref1)     *ref1     = z1;
-
-    if (lp.mode == OURO_LOOPCD_OFF) {
-        if (guided) *guided = zR;
-        return argmax_host(zR);
-    }
-
-    if (lp.mode == OURO_LOOPCD_HIDDEN) {
-        // combine the PRE-norm loop outputs, then apply output_norm and the head
-        std::vector<float> gR, g1;
-        tensor_col_to_host(out.gR, col, gR);
-        tensor_col_to_host(out.g1, col, g1);
-        std::vector<float> gp(H);
-        ouro_loopcd_combine_hidden(gR.data(), g1.data(), H, 1, lp.omega, gp.data());
-        std::vector<float> zp;
-        if (!ouro_loopcd_hidden_head(m, gp.data(), 1, zp, err)) return -1;
-        if (guided) *guided = zp;
-        return argmax_host(zp);
-    }
-
-    // logits form
-    const float omega = lp.adaptive ? ouro_loopcd_adaptive_omega(zR.data(), V, lp.omega_max) : lp.omega;
-    std::vector<float> zp(V);
-    ouro_loopcd_combine_logits(zR.data(), z1.data(), V, 1, omega, zp.data());
-    if (guided) *guided = zp;
-    return argmax_host(zp);
 }
 
 static int cmd_logits(int argc, char ** argv);
@@ -290,6 +238,9 @@ static int cmd_run(int argc, char ** argv) {
     bool  loopcd_adaptive = false, omega_set = false, omega_max_set = false;
     float loopcd_omega = 0.0f, loopcd_omega_max = 0.0f;
     int   loopcd_ref = 1;
+    float temp = 0.0f, top_p = 1.0f, repeat_penalty = 1.0f;
+    int   top_k = 0, repeat_last_n = 64;
+    uint32_t seed = 1234;
     int   loops = 0, ctx = 4096, max_tokens = 32, eos = 2;
 
     for (int i = 0; i < argc; ++i) {
@@ -311,43 +262,56 @@ static int cmd_run(int argc, char ** argv) {
         else if (a == "--loopcd-ref")          loopcd_ref  = std::atoi(arg_value(argc, argv, i).c_str());
         else if (a == "--loopcd-preset")       loopcd_preset = arg_value(argc, argv, i);
         else if (a == "--dump-guided")         dump_guided = arg_value(argc, argv, i);
+        else if (a == "--temp")                temp        = (float) std::atof(arg_value(argc, argv, i).c_str());
+        else if (a == "--top-k")               top_k       = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--top-p")               top_p       = (float) std::atof(arg_value(argc, argv, i).c_str());
+        else if (a == "--repeat-penalty")      repeat_penalty = (float) std::atof(arg_value(argc, argv, i).c_str());
+        else if (a == "--repeat-last-n")       repeat_last_n = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--seed")                seed        = (uint32_t) std::strtoul(arg_value(argc, argv, i).c_str(), nullptr, 10);
         else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
     }
     if (model_path.empty()) {
         fprintf(stderr, "usage: loopcd run -m <model.gguf> (--tokens a,b,c | --tokens-file f) "
                         "[--device cpu|vulkan] [--kv-type q8_0|f16|f32] [--ctx N] [--loops N] "
-                        "[--max-tokens N] [--eos N] [--dump-ids file] "
+                        "[--max-tokens N] [--eos N] [--dump-ids file] [--temp F] [--top-k N] [--top-p F] "
+                        "[--repeat-penalty F] [--repeat-last-n N] [--seed N] "
                         "[--loopcd off|logits|hidden] [--loopcd-preset generation|reasoning|mc] "
                         "[--loopcd-omega F] [--loopcd-omega-max F] [--loopcd-adaptive] [--loopcd-ref N] "
                         "[--dump-guided prefix]\n");
         return 1;
     }
 
-    // ---- resolve LoopCD parameters (paper Appendix B.4 presets) ----
-    ouro_loopcd_params lp;
+    ouro_gen_params gp;
     {
         std::string lerr;
-        lp.mode = parse_loopcd_mode(loopcd_str, lerr);
+        gp.loopcd.mode = parse_loopcd_mode(loopcd_str, lerr);
         if (!lerr.empty()) { fprintf(stderr, "error: %s\n", lerr.c_str()); return 1; }
 
-        float preset_omega = 0.3f, preset_cap = 1.0f;   // generation default
+        float preset_omega = 0.3f, preset_cap = 1.0f;
         if      (loopcd_preset == "generation") { preset_omega = 0.3f; preset_cap = 1.0f; }
         else if (loopcd_preset == "reasoning")  { preset_omega = 0.5f; preset_cap = 1.5f; }
         else if (loopcd_preset == "mc")         { preset_omega = 0.5f; preset_cap = 1.0f; }
-        else { fprintf(stderr, "error: unknown --loopcd-preset '%s' (generation|reasoning|mc)\n", loopcd_preset.c_str()); return 1; }
+        else { fprintf(stderr, "error: unknown --loopcd-preset '%s'\n", loopcd_preset.c_str()); return 1; }
 
-        // hidden form has its own default strength (paper D.3: Ouro-2.6B hidden peaks at omega=0.5)
-        lp.omega     = omega_set     ? loopcd_omega     : (lp.mode == OURO_LOOPCD_HIDDEN ? 0.5f : preset_omega);
-        lp.omega_max = omega_max_set ? loopcd_omega_max : preset_cap;
-        lp.adaptive  = loopcd_adaptive;
-        lp.ref_iter  = loopcd_ref;
-
-        if (lp.mode == OURO_LOOPCD_HIDDEN && lp.adaptive) {
+        gp.loopcd.omega     = omega_set     ? loopcd_omega     : (gp.loopcd.mode == OURO_LOOPCD_HIDDEN ? 0.5f : preset_omega);
+        gp.loopcd.omega_max = omega_max_set ? loopcd_omega_max : preset_cap;
+        gp.loopcd.adaptive  = loopcd_adaptive;
+        gp.loopcd.ref_iter  = loopcd_ref;
+        if (gp.loopcd.mode == OURO_LOOPCD_HIDDEN && gp.loopcd.adaptive) {
             fprintf(stderr, "error: adaptive strength is LoopCD-Logits only (paper 3.2)\n"); return 1;
         }
-        if (lp.mode != OURO_LOOPCD_OFF && lp.ref_iter != 1) {
+        if (gp.loopcd.mode != OURO_LOOPCD_OFF && gp.loopcd.ref_iter != 1) {
             fprintf(stderr, "error: only --loopcd-ref 1 is available (the M2 taps expose loop 1)\n"); return 1;
         }
+        gp.sampling.temp           = temp;
+        gp.sampling.top_k          = top_k;
+        gp.sampling.top_p          = top_p;
+        gp.sampling.repeat_penalty = repeat_penalty;
+        gp.sampling.repeat_last_n  = repeat_last_n;
+        gp.sampling.seed           = seed;
+        gp.loops                   = loops;
+        gp.eos                     = eos;
+        gp.max_tokens              = max_tokens;
     }
 
     std::vector<int32_t> prompt = !tokens_file.empty() ? read_tokens_file(tokens_file) : parse_token_list(tokens_str);
@@ -376,54 +340,40 @@ static int cmd_run(int argc, char ** argv) {
         fprintf(stderr, "error: %s\n", err.c_str()); ouro_model_free(m); return 1;
     }
 
-    printf("device=%s kv=%s loops=%d loopcd=%s omega=%.3f omega_max=%.3f adaptive=%d ref=%d n_prompt=%d ctx=%d\n",
-           device.c_str(), kv_str.c_str(), R, loopcd_str.c_str(), lp.omega, lp.omega_max,
-           lp.adaptive ? 1 : 0, lp.ref_iter, (int) prompt.size(), ctx);
+    printf("device=%s kv=%s loops=%d loopcd=%s omega=%.3f omega_max=%.3f adaptive=%d ref=%d "
+           "temp=%.3f top_k=%d top_p=%.3f repeat_penalty=%.3f seed=%u n_prompt=%d ctx=%d\n",
+           device.c_str(), kv_str.c_str(), R, loopcd_str.c_str(), gp.loopcd.omega, gp.loopcd.omega_max,
+           gp.loopcd.adaptive ? 1 : 0, gp.loopcd.ref_iter, gp.sampling.temp, gp.sampling.top_k,
+           gp.sampling.top_p, gp.sampling.repeat_penalty, gp.sampling.seed, (int) prompt.size(), ctx);
 
-    ouro_graph_outputs out;
+    ouro_generator gen;
+    if (!gen.begin(m, kv, prompt, gp, ctx, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
-    // prefill: fill all slots' rows [0, prompt.size())
-    const int64_t t_pre0 = ggml_time_us();
-    if (!ouro_forward_kv(m, kv, prompt, /*n_past=*/0, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-    const int64_t t_pre1 = ggml_time_us();
-
-    std::vector<int32_t> gen;
-    {
-        std::vector<float> gz, gu, gz1;   // guided, unguided (zR), reference (z1)
-        const int tok = loopcd_guided_argmax(m, lp, out, (int) prompt.size() - 1, &gz, &gu, &gz1, err);
-        if (tok < 0) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-        if (!dump_guided.empty()) {
-            dump_f32_vec(dump_guided + ".guided.bin",   gz);
-            dump_f32_vec(dump_guided + ".unguided.bin", gu);
-            dump_f32_vec(dump_guided + ".z1.bin",       gz1);
-        }
-        gen.push_back(tok);
+    std::vector<int32_t> out_ids;
+    const int64_t t0 = ggml_time_us();
+    while (true) {
+        int32_t tok = -1;
+        const int r = gen.next(tok, err);
+        if (r < 0) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        if (r == 0) break;
+        out_ids.push_back(tok);
     }
+    const int64_t t1 = ggml_time_us();
 
-    // decode: one graph compute per token, appending K/V and advancing n_past
-    int n_past = (int) prompt.size();
-    const int64_t t_dec0 = ggml_time_us();
-    while ((int) gen.size() < max_tokens && gen.back() != eos && n_past < ctx) {
-        std::vector<int32_t> one = { gen.back() };
-        if (!ouro_forward_kv(m, kv, one, n_past, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-        const int tok = loopcd_guided_argmax(m, lp, out, 0, nullptr, nullptr, nullptr, err);
-        if (tok < 0) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-        n_past += 1;
-        gen.push_back(tok);
-    }
-    const int64_t t_dec1 = ggml_time_us();
-
-    const double pre_s = (t_pre1 - t_pre0) / 1e6;
-    const double dec_s = (t_dec1 - t_dec0) / 1e6;
     printf("gen_ids:");
-    for (size_t i = 0; i < gen.size(); ++i) printf("%s%d", i ? "," : "", gen[i]);
+    for (size_t i = 0; i < out_ids.size(); ++i) printf("%s%d", i ? "," : "", out_ids[i]);
     printf("\n");
-    printf("prefill: %d tok in %.2fs (%.2f tok/s)\n", (int) prompt.size(), pre_s, prompt.size() / (pre_s > 0 ? pre_s : 1e-9));
-    printf("decode : %d tok in %.2fs (%.2f tok/s)\n", (int) gen.size(), dec_s, gen.size() / (dec_s > 0 ? dec_s : 1e-9));
+    printf("decode : %d tok in %.2fs (%.2f tok/s)\n", (int) out_ids.size(), (t1 - t0) / 1e6,
+           out_ids.size() / ((t1 - t0) > 0 ? (t1 - t0) / 1e6 : 1e-9));
 
+    if (!dump_guided.empty()) {
+        dump_f32_vec(dump_guided + ".guided.bin",   gen.first_guided);
+        dump_f32_vec(dump_guided + ".unguided.bin", gen.first_unguided);
+        dump_f32_vec(dump_guided + ".z1.bin",       gen.first_z1);
+    }
     if (!dump_ids.empty()) {
         std::ofstream f(dump_ids);
-        for (size_t i = 0; i < gen.size(); ++i) f << (i ? "," : "") << gen[i];
+        for (size_t i = 0; i < out_ids.size(); ++i) f << (i ? "," : "") << out_ids[i];
         f << "\n";
     }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "model.h"
+#include "graph.h"
 
 #include <string>
 #include <vector>
@@ -42,3 +43,11 @@ float ouro_loopcd_adaptive_omega(const float * zR_col, int n_vocab, float omega_
 // m.hp.eps and m.sched. Taps read from the M2 forward are invalidated by this call.
 bool ouro_loopcd_hidden_head(ouro_model & m, const float * g, int n,
                              std::vector<float> & z_out, std::string & err);
+
+// Guided logits z' for one token column of the M2 taps:
+//   off    -> zR
+//   logits -> zR + omega*(zR - z1)                     (Eq. 3; omega may be adaptive)
+//   hidden -> m.output * rms_norm(m.output_norm, gR + omega*(gR - g1))   (norm + head)
+// Reads the taps to host immediately (before the hidden head pass); `z_out` is sized [n_vocab].
+bool ouro_loopcd_guided_logits(ouro_model & m, const ouro_loopcd_params & lp, ouro_graph_outputs & out,
+                               int col, std::vector<float> & z_out, std::string & err);
