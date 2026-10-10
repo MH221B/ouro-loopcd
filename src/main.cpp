@@ -80,8 +80,74 @@ int main(int argc, char ** argv) {
     return 1;
 }
 
+static void dump_f32(const std::string & path, ggml_tensor * t) {
+    std::vector<float> buf((size_t) ggml_nelements(t));
+    ggml_backend_tensor_get(t, buf.data(), 0, ggml_nbytes(t));
+    std::ofstream f(path, std::ios::binary);
+    f.write((const char *) buf.data(), (std::streamsize) (buf.size() * sizeof(float)));
+}
+
 static int cmd_logits(int argc, char ** argv) {
-    (void) argc; (void) argv;
-    fprintf(stderr, "logits: not implemented yet\n");
-    return 1;
+    std::string model_path, tokens_str, tokens_file, dump;
+    int loops = 0;
+    for (int i = 0; i < argc; ++i) {
+        const std::string a = argv[i];
+        auto value = [&]() -> std::string {
+            if (i + 1 >= argc) { fprintf(stderr, "error: missing value for %s\n", a.c_str()); std::exit(1); }
+            return argv[++i];
+        };
+        if (a == "-m" || a == "--model")        model_path  = value();
+        else if (a == "--tokens")               tokens_str  = value();
+        else if (a == "--tokens-file")          tokens_file = value();
+        else if (a == "--loops")                loops       = std::atoi(value().c_str());
+        else if (a == "--dump")                 dump        = value();
+        else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
+    }
+    if (model_path.empty()) { fprintf(stderr, "usage: loopcd logits -m <model.gguf> (--tokens a,b,c | --tokens-file f) [--loops N] [--dump prefix]\n"); return 1; }
+
+    std::vector<int32_t> tokens = !tokens_file.empty() ? read_tokens_file(tokens_file) : parse_token_list(tokens_str);
+    if (tokens.empty()) { fprintf(stderr, "error: no tokens\n"); return 1; }
+
+    ouro_model m;
+    std::string err;
+    if (!ouro_backend_init(m, err))            { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!ouro_model_load(model_path, m, err))  { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    ouro_graph_outputs out;
+    if (!ouro_forward(m, tokens, loops, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    const int R = loops > 0 ? loops : m.hp.n_loops;
+    const int n = (int) tokens.size();
+    const int V = m.hp.n_vocab;
+    const int H = m.hp.n_embd;
+
+    // report the last-token argmax of zR as a sanity check
+    std::vector<float> zR_last(V);
+    ggml_backend_tensor_get(out.zR, zR_last.data(), (size_t) (V * (n - 1)) * sizeof(float), V * sizeof(float));
+    int best = 0;
+    for (int i = 1; i < V; ++i) if (zR_last[i] > zR_last[best]) best = i;
+    printf("loops=%d n_tokens=%d argmax(zR[-1])=%d\n", R, n, best);
+
+    if (!dump.empty()) {
+        dump_f32(dump + ".zR.bin", out.zR);
+        dump_f32(dump + ".z1.bin", out.z1);
+        dump_f32(dump + ".h1.bin", out.h1);
+        dump_f32(dump + ".hR.bin", out.hR);
+        std::ofstream j(dump + ".meta.json");
+        j << "{\n";
+        j << "  \"n_vocab\": " << V << ",\n";
+        j << "  \"n_embd\": "  << H << ",\n";
+        j << "  \"n_tokens\": " << n << ",\n";
+        j << "  \"loops\": " << R << ",\n";
+        j << "  \"tensors\": {\n";
+        j << "    \"zR\": {\"shape\": [" << V << ", " << n << "], \"file\": \"" << dump << ".zR.bin\"},\n";
+        j << "    \"z1\": {\"shape\": [" << V << ", " << n << "], \"file\": \"" << dump << ".z1.bin\"},\n";
+        j << "    \"h1\": {\"shape\": [" << H << ", " << n << "], \"file\": \"" << dump << ".h1.bin\"},\n";
+        j << "    \"hR\": {\"shape\": [" << H << ", " << n << "], \"file\": \"" << dump << ".hR.bin\"}\n";
+        j << "  }\n}\n";
+        printf("dumped to %s.*\n", dump.c_str());
+    }
+
+    ouro_model_free(m);
+    return 0;
 }
