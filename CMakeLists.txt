@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 project(loopcd CXX)
+if(WIN32)
+    enable_language(RC)   # UTF-8 argv via src/loopcd.rc + src/loopcd.manifest
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -45,6 +48,9 @@ add_executable(loopcd
     src/server.cpp
     third_party/cpp-httplib/httplib.cpp
 )
+if(WIN32)
+    target_sources(loopcd PRIVATE src/loopcd.rc)
+endif()
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)
 
