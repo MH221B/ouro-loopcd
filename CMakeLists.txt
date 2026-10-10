@@ -38,6 +38,7 @@ add_executable(loopcd
     src/model.cpp
     src/graph.cpp
     src/kv_cache.cpp
+    src/kitty_kv.cpp
     src/loopcd.cpp
     src/unicode.cpp
     src/unicode-data.cpp

@@ -1,4 +1,5 @@
 #include "generate.h"
+#include "kitty_kv.h"
 
 #include <algorithm>
 #include <cmath>
@@ -58,6 +59,7 @@ int ouro_generator::next(int32_t & out, std::string & err) {
         if (gp.max_tokens <= 0) { done = true; return 0; }
         if (!ouro_forward_kv(*m, *kv, prompt, /*n_past=*/0, R, taps, err)) return -1;
         n_past = (int) prompt.size();
+        if (!ouro_kv_kitty_quantize(*kv, n_past, err)) return -1;
         prefilled = true;
         if (sample_from(n_past - 1, out, err) < 0) return -1;
     } else {
@@ -66,6 +68,7 @@ int ouro_generator::next(int32_t & out, std::string & err) {
         const std::vector<int32_t> one = { out_ids.back() };
         if (!ouro_forward_kv(*m, *kv, one, n_past, R, taps, err)) return -1;
         ++n_past;
+        if (!ouro_kv_kitty_quantize(*kv, n_past, err)) return -1;
         if (sample_from(0, out, err) < 0) return -1;
     }
 
