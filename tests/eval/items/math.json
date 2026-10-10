@@ -1,10 +1,10 @@
 [
-  { "id": "m0", "gold": 391, "max_tokens": 1536, "enable_thinking": true,
+  { "id": "m0", "gold": 391, "max_tokens": 4096, "enable_thinking": true,
     "messages": [ { "role": "user", "content": "What is 17 * 23? Think step by step, then give the final integer answer." } ] },
-  { "id": "m1", "gold": 30, "max_tokens": 1536, "enable_thinking": true,
+  { "id": "m1", "gold": 30, "max_tokens": 4096, "enable_thinking": true,
     "messages": [ { "role": "user", "content": "A bag has 5 red and 3 blue marbles. How many ways can you choose exactly 2 red and 1 blue? Give the final integer answer." } ] },
-  { "id": "m2", "gold": 2, "max_tokens": 1536, "enable_thinking": true,
+  { "id": "m2", "gold": 2, "max_tokens": 4096, "enable_thinking": true,
     "messages": [ { "role": "user", "content": "What is the remainder when 2^10 is divided by 7? Give the final integer answer." } ] },
-  { "id": "m3", "gold": 24, "max_tokens": 1536, "enable_thinking": true,
+  { "id": "m3", "gold": 24, "max_tokens": 4096, "enable_thinking": true,
     "messages": [ { "role": "user", "content": "How many trailing zeros does 100! have? Give the final integer answer." } ] }
 ]

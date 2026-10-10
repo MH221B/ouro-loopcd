@@ -1,12 +1,12 @@
 [
-  { "id": "mc0", "gold": "B", "max_tokens": 256, "enable_thinking": false,
+  { "id": "mc0", "gold": "B", "max_tokens": 4096, "enable_thinking": false,
     "messages": [ { "role": "user", "content": "Which planet is closest to the Sun? A) Venus B) Mercury C) Earth D) Mars. Answer with a single letter." } ] },
-  { "id": "mc1", "gold": "C", "max_tokens": 256, "enable_thinking": false,
+  { "id": "mc1", "gold": "C", "max_tokens": 4096, "enable_thinking": false,
     "messages": [ { "role": "user", "content": "What gas do plants absorb from the air for photosynthesis? A) Oxygen B) Nitrogen C) Carbon dioxide D) Hydrogen. Answer with a single letter." } ] },
-  { "id": "mc2", "gold": "C", "max_tokens": 256, "enable_thinking": false,
+  { "id": "mc2", "gold": "C", "max_tokens": 4096, "enable_thinking": false,
     "messages": [ { "role": "user", "content": "Which organelle is called the powerhouse of the cell? A) Nucleus B) Ribosome C) Mitochondrion D) Golgi apparatus. Answer with a single letter." } ] },
-  { "id": "mc3", "gold": "D", "max_tokens": 256, "enable_thinking": false,
+  { "id": "mc3", "gold": "D", "max_tokens": 4096, "enable_thinking": false,
     "messages": [ { "role": "user", "content": "Which of these is a prime number? A) 9 B) 15 C) 21 D) 23. Answer with a single letter." } ] },
-  { "id": "mc4", "gold": "A", "max_tokens": 256, "enable_thinking": false,
+  { "id": "mc4", "gold": "A", "max_tokens": 4096, "enable_thinking": false,
     "messages": [ { "role": "user", "content": "At what pressure does water boil at 100 degrees Celsius? A) Standard sea-level pressure B) Half of sea-level pressure C) Twice sea-level pressure D) It never boils. Answer with a single letter." } ] }
 ]

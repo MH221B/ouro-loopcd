@@ -42,11 +42,15 @@ def loopcd_for(condition, task):
     raise ValueError(f"unknown condition: {condition}")
 
 
-def start_server(exe, cfg, port):
+def start_server(exe, cfg, port, loops=0):
     cmd = [exe, "serve", "-m", cfg["model"], "--device", cfg["device"],
-           "--kv-type", cfg["kv_type"], "--ctx", "1024", "--port", str(port)]
+           "--kv-type", cfg["kv_type"], "--ctx", str(cfg.get("ctx", 1024)), "--port", str(port)]
+    if loops > 0:
+        cmd += ["--loops", str(loops)]
     print("+", " ".join(cmd))
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    log = open(f"tests/eval/out/{cfg['name']}.server.log", "w", encoding="utf-8")
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, creationflags=flags)
     base = f"http://127.0.0.1:{port}"
     # generous: the clean config loads a 10 GB f32 GGUF before /health answers
     for _ in range(600):
@@ -80,6 +84,8 @@ def main():
     ap.add_argument("--port", type=int, default=18082)
     ap.add_argument("--limit", type=int, default=0, help="use only the first N items per task")
     ap.add_argument("--conditions", default=",".join(ALL_CONDITIONS))
+    ap.add_argument("--tasks", default=",".join(TASKS.keys()))
+    ap.add_argument("--loops", type=int, default=0, help="override the recurrent loop count (R)")
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -88,12 +94,15 @@ def main():
         raise SystemExit(f"unknown config {args.config!r}; have {sorted(cfgs)}")
     cfg = cfgs[args.config]
     conditions = [c for c in args.conditions.split(",") if c]
+    tasks = [t for t in args.tasks.split(",") if t]
 
-    proc, base = start_server(args.exe, cfg, args.port)
+    loops = args.loops or cfg.get("loops", 0)
+    proc, base = start_server(args.exe, cfg, args.port, loops)
     results = {"config": args.config, "model": cfg["model"], "device": cfg["device"],
-               "kv_type": cfg["kv_type"], "conditions": conditions, "items": []}
+               "kv_type": cfg["kv_type"], "conditions": conditions, "loops": loops, "items": []}
     try:
-        for task, (items_path, scorer, _) in TASKS.items():
+        for task in tasks:
+            items_path, scorer, _ = TASKS[task]
             items = json.loads(Path(items_path).read_text())
             if args.limit:
                 items = items[:args.limit]

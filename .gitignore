@@ -1,5 +1,8 @@
 build/
 build-*/
+# local-only: design spec + milestone plans, and fetched model assets
+docs/
+models/
 out/
 __pycache__/
 *.pyc
