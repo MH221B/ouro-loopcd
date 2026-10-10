@@ -35,6 +35,23 @@ static std::string arg_value(int argc, char ** argv, int & i) {
     return argv[++i];
 }
 
+static ggml_type parse_kv_type(const std::string & s, std::string & err) {
+    if (s == "q8_0" || s == "q8") return GGML_TYPE_Q8_0;
+    if (s == "f16")               return GGML_TYPE_F16;
+    if (s == "f32")               return GGML_TYPE_F32;
+    err = "unknown --kv-type '" + s + "' (use q8_0, f16 or f32)";
+    return GGML_TYPE_Q8_0;
+}
+
+static int argmax_col(ggml_tensor * z, int col) {
+    const int V = (int) z->ne[0];
+    std::vector<float> buf(V);
+    ggml_backend_tensor_get(z, buf.data(), (size_t) col * V * sizeof(float), V * sizeof(float));
+    int best = 0;
+    for (int i = 1; i < V; ++i) if (buf[i] > buf[best]) best = i;
+    return best;
+}
+
 static int cmd_logits(int argc, char ** argv);
 static int cmd_run(int argc, char ** argv);
 
@@ -113,45 +130,53 @@ static std::string json_escape(const std::string & s) {
 }
 
 static int cmd_logits(int argc, char ** argv) {
-    std::string model_path, tokens_str, tokens_file, dump;
-    int loops = 0;
+    std::string model_path, tokens_str, tokens_file, dump, device = "cpu", kv_str = "q8_0";
+    int loops = 0, ctx = 512;
     for (int i = 0; i < argc; ++i) {
         const std::string a = argv[i];
-        auto value = [&]() -> std::string {
-            if (i + 1 >= argc) { fprintf(stderr, "error: missing value for %s\n", a.c_str()); std::exit(1); }
-            return argv[++i];
-        };
-        if (a == "-m" || a == "--model")        model_path  = value();
-        else if (a == "--tokens")               tokens_str  = value();
-        else if (a == "--tokens-file")          tokens_file = value();
-        else if (a == "--loops")                loops       = std::atoi(value().c_str());
-        else if (a == "--dump")                 dump        = value();
+        if      (a == "-m" || a == "--model")        model_path  = arg_value(argc, argv, i);
+        else if (a == "--tokens")                    tokens_str  = arg_value(argc, argv, i);
+        else if (a == "--tokens-file")               tokens_file = arg_value(argc, argv, i);
+        else if (a == "--loops")                     loops       = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a == "--dump")                      dump        = arg_value(argc, argv, i);
+        else if (a == "--device")                    device      = arg_value(argc, argv, i);
+        else if (a == "--kv-type")                   kv_str      = arg_value(argc, argv, i);
+        else if (a == "--ctx")                       ctx         = std::atoi(arg_value(argc, argv, i).c_str());
         else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
     }
-    if (model_path.empty()) { fprintf(stderr, "usage: loopcd logits -m <model.gguf> (--tokens a,b,c | --tokens-file f) [--loops N] [--dump prefix]\n"); return 1; }
+    if (model_path.empty()) {
+        fprintf(stderr, "usage: loopcd logits -m <model.gguf> (--tokens a,b,c | --tokens-file f) "
+                        "[--loops N] [--ctx N] [--device cpu|vulkan] [--kv-type q8_0|f16] [--dump prefix]\n");
+        return 1;
+    }
 
     std::vector<int32_t> tokens = !tokens_file.empty() ? read_tokens_file(tokens_file) : parse_token_list(tokens_str);
     if (tokens.empty()) { fprintf(stderr, "error: no tokens\n"); return 1; }
 
     ouro_model m;
     std::string err;
-    if (!ouro_backend_init(m, "cpu", err))     { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-    if (!ouro_model_load(model_path, m, err))  { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-
-    ouro_graph_outputs out;
-    if (!ouro_forward(m, tokens, loops, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!ouro_backend_init(m, device, err))   { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!ouro_model_load(model_path, m, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     const int R = loops > 0 ? loops : m.hp.n_loops;
+    const ggml_type kv_type = parse_kv_type(kv_str, err);
+    if (!err.empty()) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
+    ouro_kv_cache kv;
+    if (!ouro_kv_cache_init(kv, m.backend, m.hp.n_embd_head, m.hp.n_head_kv, ctx,
+                            m.hp.n_layer * R, kv_type, err)) {
+        fprintf(stderr, "error: %s\n", err.c_str()); return 1;
+    }
+
+    ouro_graph_outputs out;
+    if (!ouro_forward_kv(m, kv, tokens, /*n_past=*/0, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+
     const int n = (int) tokens.size();
     const int V = m.hp.n_vocab;
     const int H = m.hp.n_embd;
 
-    // report the last-token argmax of zR as a sanity check
-    std::vector<float> zR_last(V);
-    ggml_backend_tensor_get(out.zR, zR_last.data(), (size_t) (V * (n - 1)) * sizeof(float), V * sizeof(float));
-    int best = 0;
-    for (int i = 1; i < V; ++i) if (zR_last[i] > zR_last[best]) best = i;
-    printf("loops=%d n_tokens=%d argmax(zR[-1])=%d\n", R, n, best);
+    const int best = argmax_col(out.zR, n - 1);
+    printf("device=%s kv=%s loops=%d n_tokens=%d argmax(zR[-1])=%d\n", device.c_str(), kv_str.c_str(), R, n, best);
 
     if (!dump.empty()) {
         dump_f32(dump + ".zR.bin", out.zR);
@@ -159,7 +184,7 @@ static int cmd_logits(int argc, char ** argv) {
         dump_f32(dump + ".h1.bin", out.h1);
         dump_f32(dump + ".hR.bin", out.hR);
         std::ofstream j(dump + ".meta.json");
-        const std::string d = json_escape(dump);
+        const std::string d = json_escape(dump);   // keep M1's Windows-path escaping
         j << "{\n";
         j << "  \"n_vocab\": " << V << ",\n";
         j << "  \"n_embd\": "  << H << ",\n";
@@ -174,6 +199,7 @@ static int cmd_logits(int argc, char ** argv) {
         printf("dumped to %s.*\n", dump.c_str());
     }
 
+    ouro_kv_cache_free(kv);
     ouro_model_free(m);
     return 0;
 }

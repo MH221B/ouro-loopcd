@@ -23,8 +23,8 @@ static ggml_tensor * kv_write_view(ggml_context * ctx, ggml_tensor * cache, ggml
 bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
                         int head_dim, int n_head_kv, int n_ctx, int n_slots,
                         ggml_type type, std::string & err) {
-    if (type != GGML_TYPE_Q8_0 && type != GGML_TYPE_F16) {
-        err = "kv cache type must be q8_0 or f16";
+    if (type != GGML_TYPE_Q8_0 && type != GGML_TYPE_F16 && type != GGML_TYPE_F32) {
+        err = "kv cache type must be q8_0, f16 or f32";
         return false;
     }
     kv.head_dim  = head_dim;
