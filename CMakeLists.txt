@@ -40,6 +40,13 @@ add_executable(loopcd
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)
 
+target_include_directories(loopcd PRIVATE third_party third_party/cpp-httplib)
+if(WIN32)
+    # cp-httplib 0.58.0 requires Windows 10+, and needs the Winsock import library.
+    add_compile_definitions(_WIN32_WINNT=0x0A00)
+    target_link_libraries(loopcd PRIVATE ws2_32)
+endif()
+
 enable_testing()
 add_executable(test_ops tests/unit/test_ops.cpp)
 target_link_libraries(test_ops PRIVATE ggml::ggml)
