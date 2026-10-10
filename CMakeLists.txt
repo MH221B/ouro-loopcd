@@ -35,6 +35,7 @@ add_executable(loopcd
     src/model.cpp
     src/graph.cpp
     src/kv_cache.cpp
+    src/loopcd.cpp
 )
 target_include_directories(loopcd PRIVATE src)
 target_link_libraries(loopcd PRIVATE ggml::ggml)
@@ -48,3 +49,8 @@ add_executable(test_kv tests/unit/test_kv.cpp src/kv_cache.cpp)
 target_include_directories(test_kv PRIVATE src)
 target_link_libraries(test_kv PRIVATE ggml::ggml)
 add_test(NAME kv COMMAND test_kv)
+
+add_executable(test_loopcd tests/unit/test_loopcd.cpp src/loopcd.cpp)
+target_include_directories(test_loopcd PRIVATE src)
+target_link_libraries(test_loopcd PRIVATE ggml::ggml)
+add_test(NAME loopcd COMMAND test_loopcd)
