@@ -1,5 +1,6 @@
 #include "model.h"
 #include "graph.h"
+#include "ggml-backend.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -29,12 +30,18 @@ static std::vector<int32_t> read_tokens_file(const std::string & path) {
     return parse_token_list(ss.str());
 }
 
-static int cmd_logits(int argc, char ** argv);
+static std::string arg_value(int argc, char ** argv, int & i) {
+    if (i + 1 >= argc) { fprintf(stderr, "error: missing value for %s\n", argv[i]); std::exit(1); }
+    return argv[++i];
+}
 
-static int cmd_inspect(const std::string & model_path) {
+static int cmd_logits(int argc, char ** argv);
+static int cmd_run(int argc, char ** argv);
+
+static int cmd_inspect(const std::string & model_path, const std::string & device) {
     ouro_model m;
     std::string err;
-    if (!ouro_backend_init(m, err))  { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!ouro_backend_init(m, device, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     if (!ouro_model_load(model_path, m, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     const auto & hp = m.hp;
@@ -58,22 +65,30 @@ static int cmd_inspect(const std::string & model_path) {
 int main(int argc, char ** argv) {
     ggml_time_init();
     if (argc < 2) {
-        fprintf(stderr, "usage: loopcd <inspect|logits> [args]\n");
+        fprintf(stderr, "usage: loopcd <inspect|logits|run> [args]\n");
         return 1;
     }
     const std::string cmd = argv[1];
 
     if (cmd == "inspect") {
         std::string model_path;
+        std::string device = "cpu";
         for (int i = 2; i < argc; ++i) {
-            if ((!strcmp(argv[i], "-m") || !strcmp(argv[i], "--model")) && i + 1 < argc) model_path = argv[++i];
+            const std::string a = argv[i];
+            if      (a == "-m" || a == "--model") model_path = arg_value(argc, argv, i);
+            else if (a == "--device")             device     = arg_value(argc, argv, i);
+            else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
         }
         if (model_path.empty()) { fprintf(stderr, "usage: loopcd inspect -m <model.gguf>\n"); return 1; }
-        return cmd_inspect(model_path);
+        return cmd_inspect(model_path, device);
     }
 
     if (cmd == "logits") {
         return cmd_logits(argc - 2, argv + 2);
+    }
+
+    if (cmd == "run") {
+        return cmd_run(argc - 2, argv + 2);
     }
 
     fprintf(stderr, "error: unknown command '%s'\n", cmd.c_str());
@@ -120,7 +135,7 @@ static int cmd_logits(int argc, char ** argv) {
 
     ouro_model m;
     std::string err;
-    if (!ouro_backend_init(m, err))            { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+    if (!ouro_backend_init(m, "cpu", err))     { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
     if (!ouro_model_load(model_path, m, err))  { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
 
     ouro_graph_outputs out;
@@ -161,4 +176,10 @@ static int cmd_logits(int argc, char ** argv) {
 
     ouro_model_free(m);
     return 0;
+}
+
+static int cmd_run(int argc, char ** argv) {
+    (void) argc; (void) argv;
+    fprintf(stderr, "run: not implemented yet\n");
+    return 1;
 }

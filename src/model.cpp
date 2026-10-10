@@ -38,12 +38,27 @@ static ggml_tensor * require_tensor(ggml_context * ctx, const std::string & name
     return t;
 }
 
-bool ouro_backend_init(ouro_model & m, std::string & err) {
+bool ouro_backend_init(ouro_model & m, const std::string & device, std::string & err) {
     ggml_backend_load_all();
-    m.backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
-    if (!m.backend) { err = "failed to init CPU backend"; return false; }
-    ggml_backend_t backends[1] = { m.backend };
-    m.sched = ggml_backend_sched_new(backends, nullptr, 1, 16384, false, true);
+
+    if (device == "cpu") {
+        m.backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+        if (!m.backend) { err = "failed to init CPU backend"; return false; }
+    } else if (device == "vulkan") {
+        // The 890M is an integrated GPU, so it reports as IGPU, not GPU.
+        m.backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, nullptr);
+        if (!m.backend) m.backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_IGPU, nullptr);
+        if (!m.backend) { err = "no Vulkan (GPU/IGPU) device found; use --device cpu"; return false; }
+        m.backend_cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, nullptr);
+        if (!m.backend_cpu) { err = "failed to init CPU fallback backend"; return false; }
+    } else {
+        err = "unknown device '" + device + "' (use cpu or vulkan)";
+        return false;
+    }
+
+    ggml_backend_t backends[2] = { m.backend, m.backend_cpu };
+    const int n_backends = m.backend_cpu ? 2 : 1;
+    m.sched = ggml_backend_sched_new(backends, nullptr, n_backends, 16384, false, true);
     if (!m.sched) { err = "failed to create scheduler"; return false; }
     return true;
 }
@@ -138,9 +153,10 @@ bool ouro_model_load(const std::string & path, ouro_model & m, std::string & err
 }
 
 void ouro_model_free(ouro_model & m) {
-    if (m.sched)   { ggml_backend_sched_free(m.sched);   m.sched = nullptr; }
-    if (m.buf_w)   { ggml_backend_buffer_free(m.buf_w); m.buf_w = nullptr; }
-    if (m.ctx_w)   { ggml_free(m.ctx_w);                 m.ctx_w = nullptr; }
-    if (m.ctx_g)   { gguf_free(m.ctx_g);                 m.ctx_g = nullptr; }
-    if (m.backend) { ggml_backend_free(m.backend);       m.backend = nullptr; }
+    if (m.sched)       { ggml_backend_sched_free(m.sched);   m.sched = nullptr; }
+    if (m.buf_w)       { ggml_backend_buffer_free(m.buf_w);   m.buf_w = nullptr; }
+    if (m.ctx_w)       { ggml_free(m.ctx_w);                  m.ctx_w = nullptr; }
+    if (m.ctx_g)       { gguf_free(m.ctx_g);                  m.ctx_g = nullptr; }
+    if (m.backend)     { ggml_backend_free(m.backend);        m.backend = nullptr; }
+    if (m.backend_cpu) { ggml_backend_free(m.backend_cpu);    m.backend_cpu = nullptr; }
 }

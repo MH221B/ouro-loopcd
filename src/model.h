@@ -38,7 +38,8 @@ struct ouro_layer {
 
 struct ouro_model {
     ouro_hparams hp;
-    ggml_backend_t backend = nullptr;
+    ggml_backend_t backend     = nullptr;   // primary device (Vulkan, or CPU with --device cpu)
+    ggml_backend_t backend_cpu = nullptr;   // CPU fallback for --device vulkan; null for --device cpu
     ggml_backend_sched_t sched = nullptr;
 
     ggml_context * ctx_w = nullptr;      // owns weight tensor structs
@@ -51,8 +52,9 @@ struct ouro_model {
     std::vector<ouro_layer> layers;
 };
 
-// Creates the CPU backend and scheduler. Call before ouro_model_load.
-bool ouro_backend_init(ouro_model & m, std::string & err);
+// Creates the primary backend named by `device` ("cpu" or "vulkan") and a scheduler.
+// With "vulkan", a CPU backend is added as a fallback. Call before ouro_model_load.
+bool ouro_backend_init(ouro_model & m, const std::string & device, std::string & err);
 
 // Reads the GGUF, validates shapes, and uploads weights to the backend.
 bool ouro_model_load(const std::string & path, ouro_model & m, std::string & err);

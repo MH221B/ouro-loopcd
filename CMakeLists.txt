@@ -17,7 +17,13 @@ FetchContent_Declare(
     GIT_REPOSITORY https://github.com/ggml-org/ggml.git
     GIT_TAG        ffa4e8b80930029a35991f94e7c8a93cd67730ab
 )
-set(GGML_VULKAN          OFF CACHE BOOL "" FORCE)  # Plan 2 flips this ON
+# M2: Vulkan is the shipping backend. -DLOOPCD_VULKAN=OFF builds a CPU-only binary.
+option(LOOPCD_VULKAN "loopcd: build the Vulkan backend (requires the Vulkan SDK)" ON)
+if(LOOPCD_VULKAN)
+    set(GGML_VULKAN ON  CACHE BOOL "" FORCE)
+else()
+    set(GGML_VULKAN OFF CACHE BOOL "" FORCE)
+endif()
 set(GGML_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_TOOLS     OFF CACHE BOOL "" FORCE)
