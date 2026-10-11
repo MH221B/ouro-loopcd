@@ -1,5 +1,6 @@
 #include "kv_cache.h"
 #include "ggml-alloc.h"
+#include "cache_layout.h"
 
 #include <cstdio>
 
