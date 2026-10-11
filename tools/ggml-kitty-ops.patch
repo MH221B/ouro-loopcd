@@ -1,0 +1,723 @@
+diff --git a/include/ggml.h b/include/ggml.h
+index 224bdef9..8091846e 100644
+--- a/include/ggml.h
++++ b/include/ggml.h
+@@ -601,6 +601,11 @@ extern "C" {
+ 
+         GGML_OP_GLU,
+ 
++        // loopcd M7c: packed Kitty-KV attention (QK -> SOFT_MAX -> SV). Appended last so
++        // existing op values are unchanged; see docs/superpowers/specs/2026-10-11-loopcd-m7-packed-kv-design.md §8.
++        GGML_OP_KITTY_QK,
++        GGML_OP_KITTY_SV,
++
+         GGML_OP_COUNT,
+     };
+ 
+@@ -2508,6 +2513,36 @@ extern "C" {
+             struct ggml_tensor * a,
+             int32_t              n_kv_max);
+ 
++    // loopcd M7c packed Kitty-KV ops. Both consume packed 2-bit planes directly.
++    //
++    // q:      f32 [head_dim, n_head, n_q, 1]
++    // k_f16:  f16 [head_dim, n_head, n_sink + n_qbuf, 1]      (sink | qbuf)
++    // k_planes: I8 1-D blob (planes + idx + meta; layout fixed at P=128, D=128, D_BOOST=32)
++    // returns f32 logits [n_kv, n_q, n_head, 1] with n_kv = n_sink + n_pages*128 + n_qbuf,
++    // shaped so ggml_soft_max normalizes over the key axis (ne0).
++    GGML_API struct ggml_tensor * ggml_kitty_qk(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * q,
++            struct ggml_tensor  * k_f16,
++            struct ggml_tensor  * k_planes,
++            int32_t               n_sink,
++            int32_t               n_qbuf,
++            int32_t               n_pages,
++            float                 scale);
++
++    // probs:  f32 [n_kv, n_q, n_head, 1]   (softmax output)
++    // v_f16:  f16 [head_dim, n_head, n_sink + 128, 1]   (staging; the f16 window is a ring)
++    // v_planes: I8 1-D blob
++    // returns f32 [head_dim, n_head, n_q, 1] (matches ggml_flash_attn_ext's output shape).
++    GGML_API struct ggml_tensor * ggml_kitty_sv(
++            struct ggml_context * ctx,
++            struct ggml_tensor  * probs,
++            struct ggml_tensor  * v_f16,
++            struct ggml_tensor  * v_planes,
++            int32_t               n_sink,
++            int32_t               n_vp,
++            int32_t               n_vqbuf);
++
+     GGML_API void ggml_flash_attn_ext_add_sinks(
+             struct ggml_tensor * a,
+             struct ggml_tensor * sinks);
+diff --git a/src/ggml-cpu/ggml-cpu.c b/src/ggml-cpu/ggml-cpu.c
+index 7c274c03..230ad0a8 100644
+--- a/src/ggml-cpu/ggml-cpu.c
++++ b/src/ggml-cpu/ggml-cpu.c
+@@ -2037,6 +2037,14 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
+                 bool masked = t != 0;
+                 ggml_compute_forward_flash_attn_back(params, masked, tensor);
+             } break;
++        case GGML_OP_KITTY_QK:
++            {
++                ggml_compute_forward_kitty_qk(params, tensor);
++            } break;
++        case GGML_OP_KITTY_SV:
++            {
++                ggml_compute_forward_kitty_sv(params, tensor);
++            } break;
+         case GGML_OP_SSM_CONV:
+             {
+                 ggml_compute_forward_ssm_conv(params, tensor);
+@@ -2493,6 +2501,11 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
+             {
+                 n_tasks = n_threads;
+             } break;
++        case GGML_OP_KITTY_QK:
++        case GGML_OP_KITTY_SV:
++            {
++                n_tasks = 1;   // loopcd M7c: single-threaded reference kernels (ith == 0)
++            } break;
+         case GGML_OP_NONE:
+             {
+                 n_tasks = 1;
+diff --git a/src/ggml-cpu/kitty-layout.h b/src/ggml-cpu/kitty-layout.h
+new file mode 100644
+index 00000000..a3cf5d81
+--- /dev/null
++++ b/src/ggml-cpu/kitty-layout.h
+@@ -0,0 +1,27 @@
++// src/ggml-cpu/kitty-layout.h — fixed part of the packed Kitty-KV layout (mirror of
++// loopcd/src/cache_layout.h). Fixed by the M7 design: P=128, D=128, D_BOOST=32.
++#pragma once
++#include <cstddef>
++
++namespace kitty_fork_layout {
++constexpr int P       = 128;
++constexpr int D       = 128;
++constexpr int D_BOOST = 32;
++
++constexpr size_t K_LOW_BYTES  = (size_t) D       * (P / 4);   // 4096
++constexpr size_t K_HIGH_BYTES = (size_t) D_BOOST * (P / 4);   // 1024
++constexpr size_t K_IDX_BYTES  = (size_t) D;                   // 128
++constexpr size_t K_META_BYTES = (size_t) D * 2 * 2;           // 512
++constexpr size_t K_HEAD_BYTES = K_LOW_BYTES + K_HIGH_BYTES + K_IDX_BYTES + K_META_BYTES; // 5760
++constexpr size_t K_OFF_HIGH   = K_LOW_BYTES;
++constexpr size_t K_OFF_IDX    = K_LOW_BYTES + K_HIGH_BYTES;
++constexpr size_t K_OFF_META   = K_OFF_IDX + K_IDX_BYTES;
++
++constexpr size_t V_DATA_BYTES = (size_t) D * (P / 4);         // 4096
++constexpr size_t V_META_BYTES = (size_t) P * 2 * 2;           // 512
++constexpr size_t V_HEAD_BYTES = V_DATA_BYTES + V_META_BYTES;  // 4608
++constexpr size_t V_OFF_META   = V_DATA_BYTES;
++
++inline size_t k_page_bytes(int H) { return (size_t) H * K_HEAD_BYTES; }
++inline size_t v_page_bytes(int H) { return (size_t) H * V_HEAD_BYTES; }
++} // namespace kitty_fork_layout
+diff --git a/src/ggml-cpu/ops.cpp b/src/ggml-cpu/ops.cpp
+index 16a916d2..79d9b0fb 100644
+--- a/src/ggml-cpu/ops.cpp
++++ b/src/ggml-cpu/ops.cpp
+@@ -7,6 +7,7 @@
+ #include "ggml.h"
+ #include "unary-ops.h"
+ #include "vec.h"
++#include "kitty-layout.h"
+ 
+ #include <algorithm>
+ #include <cfloat>
+@@ -5940,6 +5941,143 @@ void ggml_compute_forward_soft_max(
+     }
+ }
+ 
++// loopcd M7c: packed Kitty-KV CPU reference. Thread 0 does all the work; the ops are
++// the test oracle, not a performance path.
++static inline int kitty_get_i32(const struct ggml_tensor * t, int i) {
++    int32_t v; memcpy(&v, (const char *) t->op_params + 4 * i, 4); return v;
++}
++static inline float kitty_get_f32(const struct ggml_tensor * t, int i) {
++    float v; memcpy(&v, (const char *) t->op_params + 4 * i, 4); return v;
++}
++static inline uint8_t kitty_byte(const uint8_t * p, size_t off) { return p[off]; }
++static inline ggml_fp16_t kitty_f16_at(const uint8_t * p, size_t off) {
++    ggml_fp16_t h; memcpy(&h, p + off, 2); return h;
++}
++
++void ggml_compute_forward_kitty_qk(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
++    using namespace kitty_fork_layout;
++    if (params->ith != 0) return;
++
++    const struct ggml_tensor * q  = dst->src[0];
++    const struct ggml_tensor * kf = dst->src[1];
++    const struct ggml_tensor * kp = dst->src[2];
++
++    const int32_t n_sink  = kitty_get_i32(dst, 0);
++    const int32_t n_qbuf  = kitty_get_i32(dst, 1);
++    const int32_t n_pages = kitty_get_i32(dst, 2);
++    const float   scale   = kitty_get_f32(dst, 3);
++
++    const int D_ = (int) q->ne[0], H = (int) q->ne[1], NQ = (int) q->ne[2];
++    const int n_kv = (int) dst->ne[0];
++
++    const float          * qp   = (const float          *) q->data;
++    const ggml_fp16_t    * kfp  = (const ggml_fp16_t    *) kf->data;
++    const uint8_t        * kpp  = (const uint8_t        *) kp->data;
++    float                * out  = (float                *) dst->data;
++
++    for (int h = 0; h < H; ++h) {
++        for (int qi = 0; qi < NQ; ++qi) {
++            const float * qh  = qp + (qi * H + h) * D_;
++            float *       row = out + (h * NQ + qi) * n_kv;
++
++            // Sink: staging rows are [0, n_sink) and key == absolute position.
++            for (int key = 0; key < n_sink; ++key) {
++                const ggml_fp16_t * krow = kfp + (size_t) key * H * D_ + (size_t) h * D_;
++                float acc = 0.0f;
++                for (int d = 0; d < D_; ++d) acc += qh[d] * ggml_fp16_to_fp32(krow[d]);
++                row[key] = acc * scale;
++            }
++            // Pending (qbuf): the key axis is [sink | pages | qbuf], so qbuf keys sit
++            // AFTER the packed pages, while the K pending staging rows are CONTIGUOUS at
++            // [n_sink, n_sink + n_qbuf). Map key -> row explicitly; using row == key
++            // silently zeroes the pending logits whenever n_pages > 0.
++            for (int i = 0; i < n_qbuf; ++i) {
++                const int key = n_sink + n_pages * P + i;
++                const ggml_fp16_t * krow = kfp + (size_t) (n_sink + i) * H * D_ + (size_t) h * D_;
++                float acc = 0.0f;
++                for (int d = 0; d < D_; ++d) acc += qh[d] * ggml_fp16_to_fp32(krow[d]);
++                row[key] = acc * scale;
++            }
++
++            for (int pg = 0; pg < n_pages; ++pg) {
++                const uint8_t * page = kpp + (size_t) pg * k_page_bytes(H);
++                for (int t = 0; t < P; ++t) {
++                    float acc = 0.0f;
++                    for (int d = 0; d < D_; ++d) {
++                        const uint8_t * head = page + (size_t) h * K_HEAD_BYTES;
++                        const int low = (head[d * (P / 4) + t / 4] >> ((t & 3) * 2)) & 3;
++                        const int idx = head[K_OFF_IDX + d];
++                        int code = low;
++                        if (idx < D_BOOST) {
++                            const int high = (head[K_OFF_HIGH + (size_t) idx * (P / 4) + t / 4]
++                                              >> ((t & 3) * 2)) & 3;
++                            code = low | (high << 2);
++                        }
++                        const float s = ggml_fp16_to_fp32(kitty_f16_at(head, K_OFF_META + d * 4));
++                        const float m = ggml_fp16_to_fp32(kitty_f16_at(head, K_OFF_META + d * 4 + 2));
++                        acc += qh[d] * ((float) code * s + m);
++                    }
++                    row[n_sink + pg * P + t] = acc * scale;
++                }
++            }
++        }
++    }
++}
++
++void ggml_compute_forward_kitty_sv(const struct ggml_compute_params * params, struct ggml_tensor * dst) {
++    using namespace kitty_fork_layout;
++    if (params->ith != 0) return;
++
++    const struct ggml_tensor * probs = dst->src[0];
++    const struct ggml_tensor * vf    = dst->src[1];
++    const struct ggml_tensor * vp    = dst->src[2];
++
++    const int32_t n_sink  = kitty_get_i32(dst, 0);
++    const int32_t n_vp    = kitty_get_i32(dst, 1);
++    const int32_t n_vqbuf = kitty_get_i32(dst, 2);
++
++    const int D_ = (int) dst->ne[0], H = (int) dst->ne[1], NQ = (int) dst->ne[2];
++    const int n_kv = (int) probs->ne[0];
++    const int vq_head = n_vp % P;
++
++    const float       * sp  = (const float       *) probs->data;
++    const ggml_fp16_t * vfp = (const ggml_fp16_t *) vf->data;
++    const uint8_t     * vpp = (const uint8_t     *) vp->data;
++    float             * out = (float             *) dst->data;
++
++    for (int h = 0; h < H; ++h) {
++        for (int qi = 0; qi < NQ; ++qi) {
++            const float * prow = sp + ((size_t) h * NQ + qi) * n_kv;
++            float * orow = out + ((size_t) qi * H + h) * D_;
++            for (int d = 0; d < D_; ++d) orow[d] = 0.0f;
++
++            for (int key = 0; key < n_kv; ++key) {
++                const float prob = prow[key];
++                if (key < n_sink) {
++                    const ggml_fp16_t * vrow = vfp + (size_t) key * H * D_ + (size_t) h * D_;
++                    for (int d = 0; d < D_; ++d) orow[d] += prob * ggml_fp16_to_fp32(vrow[d]);
++                } else if (key < n_sink + n_vp) {
++                    const int rel = key - n_sink;
++                    const int pg  = rel / P, tt = rel % P;
++                    const uint8_t * page = vpp + (size_t) pg * v_page_bytes(H);
++                    const uint8_t * head = page + (size_t) h * V_HEAD_BYTES;
++                    const float s = ggml_fp16_to_fp32(kitty_f16_at(head, V_OFF_META + tt * 4));
++                    const float m = ggml_fp16_to_fp32(kitty_f16_at(head, V_OFF_META + tt * 4 + 2));
++                    for (int d = 0; d < D_; ++d) {
++                        const int qq = (head[(size_t) tt * (D / 4) + d / 4] >> ((d & 3) * 2)) & 3;
++                        orow[d] += prob * ((float) qq * s + m);
++                    }
++                } else {
++                    const int i = key - (n_sink + n_vp);
++                    const int slot = (vq_head + i) % P;
++                    const ggml_fp16_t * vrow = vfp + (size_t) (n_sink + slot) * H * D_ + (size_t) h * D_;
++                    for (int d = 0; d < D_; ++d) orow[d] += prob * ggml_fp16_to_fp32(vrow[d]);
++                }
++            }
++        }
++    }
++}
++
+ 
+ // ggml_compute_forward_soft_max_ext_back
+ 
+diff --git a/src/ggml-cpu/ops.h b/src/ggml-cpu/ops.h
+index 2728b08b..141de44b 100644
+--- a/src/ggml-cpu/ops.h
++++ b/src/ggml-cpu/ops.h
+@@ -87,6 +87,8 @@ void ggml_compute_forward_leaky_relu(const struct ggml_compute_params * params,
+ void ggml_compute_forward_tri(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_fill(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_flash_attn_ext(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_kitty_qk(const struct ggml_compute_params * params, struct ggml_tensor * dst);
++void ggml_compute_forward_kitty_sv(const struct ggml_compute_params * params, struct ggml_tensor * dst);
+ void ggml_compute_forward_flash_attn_back(
+         const struct ggml_compute_params * params,
+         const bool masked,
+diff --git a/src/ggml-vulkan/ggml-vulkan-push-constants.h b/src/ggml-vulkan/ggml-vulkan-push-constants.h
+index f1f66a62..51e27dc4 100644
+--- a/src/ggml-vulkan/ggml-vulkan-push-constants.h
++++ b/src/ggml-vulkan/ggml-vulkan-push-constants.h
+@@ -456,6 +456,28 @@ struct vk_op_diag_mask_push_constants {
+     int32_t n_past;
+ };
+ 
++struct vk_op_kitty_qk_push_constants {
++    uint32_t n_kv;
++    uint32_t n_sink;
++    uint32_t n_qbuf;
++    uint32_t n_pages;
++    uint32_t n_q;
++    uint32_t n_head;
++    uint32_t kf_row_stride;   // elements per staging row (= n_embd_kv)
++    float    scale;
++};
++
++struct vk_op_kitty_sv_push_constants {
++    uint32_t n_kv;
++    uint32_t n_sink;
++    uint32_t n_vp;
++    uint32_t n_vqbuf;
++    uint32_t n_head;
++    uint32_t n_q;
++    uint32_t vf_row_stride;   // elements per staging row (= n_embd_kv)
++    uint32_t pad0;
++};
++
+ struct vk_op_rope_push_constants {
+     uint32_t rope_mode;
+     uint32_t nrows;
+diff --git a/src/ggml-vulkan/ggml-vulkan-types.h b/src/ggml-vulkan/ggml-vulkan-types.h
+index 4158ff77..cc51879e 100644
+--- a/src/ggml-vulkan/ggml-vulkan-types.h
++++ b/src/ggml-vulkan/ggml-vulkan-types.h
+@@ -938,6 +938,9 @@ struct vk_device_struct {
+     vk_pipeline pipeline_soft_max_f32_wg512, pipeline_soft_max_f32_f16_wg512;
+     vk_pipeline pipeline_soft_max_back_f32;
+ 
++    vk_pipeline pipeline_kitty_qk_f32;
++    vk_pipeline pipeline_kitty_sv_f32;
++
+     vk_pipeline pipeline_soft_max_large1_f32, pipeline_soft_max_large1_f32_f16;
+     vk_pipeline pipeline_soft_max_large2_f32, pipeline_soft_max_large2_f32_f16;
+     vk_pipeline pipeline_soft_max_large3_f32, pipeline_soft_max_large3_f32_f16;
+diff --git a/src/ggml-vulkan/ggml-vulkan.cpp b/src/ggml-vulkan/ggml-vulkan.cpp
+index 5587dfc2..b37ebb5f 100644
+--- a/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -3503,6 +3503,9 @@ void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+     ggml_vk_create_pipeline(device, device->pipeline_soft_max_large2_f32_f16, "soft_max_large2_f32_f16", soft_max_large2_f32_f16_len, soft_max_large2_f32_f16_data, "main", 6, sizeof(vk_op_soft_max_push_constants), {1, 1, 1}, { 128, 4 }, 1, true);
+     ggml_vk_create_pipeline(device, device->pipeline_soft_max_large3_f32_f16, "soft_max_large3_f32_f16", soft_max_large3_f32_f16_len, soft_max_large3_f32_f16_data, "main", 6, sizeof(vk_op_soft_max_push_constants), {1, 1, 1}, { 128, 4 }, 1, true);
+ 
++    ggml_vk_create_pipeline(device, device->pipeline_kitty_qk_f32, "kitty_qk_f32", kitty_qk_f32_len, kitty_qk_f32_data, "main", 4, sizeof(vk_op_kitty_qk_push_constants), {1, 1, 1}, {}, 1);
++    ggml_vk_create_pipeline(device, device->pipeline_kitty_sv_f32, "kitty_sv_f32", kitty_sv_f32_len, kitty_sv_f32_data, "main", 4, sizeof(vk_op_kitty_sv_push_constants), {1, 1, 1}, {}, 1);
++
+     ggml_vk_create_pipeline(device, device->pipeline_rope_norm_f32, "rope_norm_f32", rope_norm_f32_len, rope_norm_f32_data, "main", 5, sizeof(vk_op_rope_push_constants), {1, 512, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_rope_neox_f32, "rope_neox_f32", rope_neox_f32_len, rope_neox_f32_data, "main", 5, sizeof(vk_op_rope_push_constants), {1, 512, 1}, {}, 1);
+     ggml_vk_create_pipeline(device, device->pipeline_rope_multi_f32, "rope_multi_f32", rope_multi_f32_len, rope_multi_f32_data, "main", 5, sizeof(vk_op_rope_push_constants), {1, 512, 1}, {}, 1);
+@@ -8965,6 +8968,10 @@ static vk_pipeline ggml_vk_op_get_pipeline(ggml_backend_vk_context * ctx, const
+             return ctx->device->pipeline_soft_max_back_f32;
+         }
+         return nullptr;
++    case GGML_OP_KITTY_QK:
++        return ctx->device->pipeline_kitty_qk_f32;
++    case GGML_OP_KITTY_SV:
++        return ctx->device->pipeline_kitty_sv_f32;
+     case GGML_OP_ROPE:
+     case GGML_OP_ROPE_BACK:
+         {
+@@ -9427,6 +9434,12 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
+                 elements = { nr, 1, 1 };
+             }
+         } break;
++    case GGML_OP_KITTY_QK:
++        elements = { (uint32_t) CEIL_DIV(dst->ne[0], 16), (uint32_t) dst->ne[1], (uint32_t) dst->ne[2] };
++        break;
++    case GGML_OP_KITTY_SV:
++        elements = { (uint32_t) dst->ne[2], (uint32_t) dst->ne[1], 1 };
++        break;
+     case GGML_OP_SOLVE_TRI:
+         {
+             uint32_t nr = (uint32_t)(ne02 * ne03);
+@@ -11088,6 +11101,37 @@ void ggml_vk_soft_max(ggml_backend_vk_context * ctx, vk_context& subctx, const g
+     }
+ }
+ 
++static void ggml_vk_kitty_qk(ggml_backend_vk_context * ctx, vk_context& subctx,
++                             const ggml_tensor * q, const ggml_tensor * kf, const ggml_tensor * kp,
++                             ggml_tensor * dst) {
++    int32_t n_sink = 0, n_qbuf = 0, n_pages = 0; float scale = 1.0f;
++    memcpy(&n_sink,  (const char *) dst->op_params + 0,  4);
++    memcpy(&n_qbuf,  (const char *) dst->op_params + 4,  4);
++    memcpy(&n_pages, (const char *) dst->op_params + 8,  4);
++    memcpy(&scale,   (const char *) dst->op_params + 12, 4);
++    vk_op_kitty_qk_push_constants pc {
++        (uint32_t) dst->ne[0], (uint32_t) n_sink, (uint32_t) n_qbuf, (uint32_t) n_pages,
++        (uint32_t) q->ne[2], (uint32_t) q->ne[1],
++        (uint32_t) (kf->ne[0] * kf->ne[1]), scale };
++    ggml_vk_op_f32<vk_op_kitty_qk_push_constants>(ctx, subctx, q, kf, kp, nullptr, dst,
++        GGML_OP_KITTY_QK, std::move(pc));
++}
++
++static void ggml_vk_kitty_sv(ggml_backend_vk_context * ctx, vk_context& subctx,
++                             const ggml_tensor * probs, const ggml_tensor * vf, const ggml_tensor * vp,
++                             ggml_tensor * dst) {
++    int32_t n_sink = 0, n_vp = 0, n_vqbuf = 0;
++    memcpy(&n_sink,  (const char *) dst->op_params + 0, 4);
++    memcpy(&n_vp,    (const char *) dst->op_params + 4, 4);
++    memcpy(&n_vqbuf, (const char *) dst->op_params + 8, 4);
++    vk_op_kitty_sv_push_constants pc {
++        (uint32_t) probs->ne[0], (uint32_t) n_sink, (uint32_t) n_vp, (uint32_t) n_vqbuf,
++        (uint32_t) probs->ne[2], (uint32_t) probs->ne[1],
++        (uint32_t) (vf->ne[0] * vf->ne[1]), 0u };
++    ggml_vk_op_f32<vk_op_kitty_sv_push_constants>(ctx, subctx, probs, vf, vp, nullptr, dst,
++        GGML_OP_KITTY_SV, std::move(pc));
++}
++
+ void ggml_vk_soft_max_back(ggml_backend_vk_context * ctx, vk_context& subctx, const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst) {
+     float * op_params = (float *)dst->op_params;
+     ggml_vk_op_f32<vk_op_push_constants>(ctx, subctx, src0, src1, nullptr, nullptr, dst, GGML_OP_SOFT_MAX_BACK, { (uint32_t)src0->ne[0], (uint32_t)ggml_nrows(src0), op_params[0], op_params[1], 0.0f, 0.0f });
+@@ -12553,6 +12597,12 @@ bool ggml_vk_build_graph(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, in
+     case GGML_OP_SOFT_MAX_BACK:
+         ggml_vk_soft_max_back(ctx, compute_ctx, src0, src1, node);
+ 
++        break;
++    case GGML_OP_KITTY_QK:
++        ggml_vk_kitty_qk(ctx, compute_ctx, src0, src1, src2, node);
++        break;
++    case GGML_OP_KITTY_SV:
++        ggml_vk_kitty_sv(ctx, compute_ctx, src0, src1, src2, node);
+         break;
+     case GGML_OP_ROPE:
+         ggml_vk_rope(ctx, compute_ctx, cgraph, node_idx, false);
+@@ -15762,6 +15812,16 @@ static bool ggml_backend_vk_device_supports_op(ggml_backend_dev_t dev, const ggm
+         case GGML_OP_SOFT_MAX_BACK:
+             return ggml_is_contiguous(op->src[0]) && op->src[0]->type == GGML_TYPE_F32
+                 && ggml_is_contiguous(op->src[1]) && op->src[1]->type == GGML_TYPE_F32;
++        case GGML_OP_KITTY_QK:
++            return op->src[0]->type == GGML_TYPE_F32
++                && op->src[1]->type == GGML_TYPE_F16
++                && op->src[2]->type == GGML_TYPE_I8
++                && op->type == GGML_TYPE_F32;
++        case GGML_OP_KITTY_SV:
++            return op->src[0]->type == GGML_TYPE_F32
++                && op->src[1]->type == GGML_TYPE_F16
++                && op->src[2]->type == GGML_TYPE_I8
++                && op->type == GGML_TYPE_F32;
+         case GGML_OP_SUM:
+         case GGML_OP_SUM_ROWS:
+         case GGML_OP_MEAN:
+diff --git a/src/ggml-vulkan/vulkan-shaders/kitty_qk.comp b/src/ggml-vulkan/vulkan-shaders/kitty_qk.comp
+new file mode 100644
+index 00000000..75d84ecf
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/kitty_qk.comp
+@@ -0,0 +1,96 @@
++#version 450
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++#extension GL_EXT_control_flow_attributes : enable
++
++layout (push_constant) uniform parameter {
++    uint  n_kv;
++    uint  n_sink;
++    uint  n_qbuf;
++    uint  n_pages;
++    uint  n_q;
++    uint  n_head;
++    uint  kf_row_stride;
++    float scale;
++} p;
++
++#include "types.glsl"
++
++layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
++
++layout(binding = 0) readonly  buffer Q  { float     data_q[];  };
++layout(binding = 1) readonly  buffer KF { float16_t data_kf[]; };
++layout(binding = 2) readonly  buffer KP { uint      data_kp[]; };
++layout(binding = 3) writeonly buffer L  { float     data_l[];  };
++
++const uint D       = 128u;
++const uint P       = 128u;
++const uint D_BOOST = 32u;
++const uint K_OFF_HIGH = 4096u;
++const uint K_OFF_IDX  = 5120u;
++const uint K_OFF_META = 5248u;
++const uint K_HEAD     = 5760u;
++
++shared float q_sh[D];
++shared float part[16u * D];
++
++// Extract token i (0..15) of a 4-byte little-endian token group.
++uint tok2(uint u, uint i) { return (u >> (((i / 4u) * 8u) + ((i % 4u) * 2u))) & 3u; }
++
++void main() {
++    const uint block = gl_WorkGroupID.x;
++    const uint qi    = gl_WorkGroupID.y;
++    const uint h     = gl_WorkGroupID.z;
++    const uint d     = gl_LocalInvocationID.x;
++
++    const uint kf_stride = p.kf_row_stride;          // = n_embd_kv (elements per staging row)
++    q_sh[d] = data_q[(qi * p.n_head + h) * D + d];
++    barrier();
++
++    const uint key0 = block * 16u;
++    float acc[16];
++    [[unroll]] for (uint i = 0u; i < 16u; ++i) acc[i] = 0.0;
++
++    const bool in_page = (key0 >= p.n_sink) && (key0 + 16u <= p.n_sink + p.n_pages * P);
++    if (in_page) {
++        const uint prel = key0 - p.n_sink;
++        const uint t0   = prel % P;                  // multiple of 16
++        const uint hb   = h * K_HEAD;
++        const uint lowb = data_kp[(hb + d * (P / 4u) + t0 / 4u) / 4u];
++        const uint idxb = data_kp[(hb + K_OFF_IDX + (d & ~3u)) / 4u];
++        const uint idx  = (idxb >> ((d & 3u) * 8u)) & 0xffu;
++        vec2 sm = unpackHalf2x16(data_kp[(hb + K_OFF_META + d * 4u) / 4u]);
++        const float scale_d = sm.x, min_d = sm.y;
++        uint highb = 0u;
++        if (idx < D_BOOST) highb = data_kp[(hb + K_OFF_HIGH + idx * (P / 4u) + t0 / 4u) / 4u];
++        [[unroll]] for (uint i = 0u; i < 16u; ++i) {
++            const uint lo = tok2(lowb, i);
++            const uint hi = (idx < D_BOOST) ? tok2(highb, i) : 0u;
++            const float val = float(lo | (hi << 2u)) * scale_d + min_d;
++            acc[i] = q_sh[d] * val;
++        }
++    } else {
++        // Non-page blocks are the sink and the qbuf region. The key axis is
++        // [sink | pages | qbuf], but the staging rows are [sink | qbuf] CONTIGUOUS,
++        // so a qbuf key maps to row = key - n_pages*P. (Using row == key zeroes the
++        // pending logits whenever n_pages > 0.)
++        [[unroll]] for (uint i = 0u; i < 16u; ++i) {
++            const uint key = key0 + i;
++            if (key < p.n_kv) {
++                const uint row = (key < p.n_sink) ? key : (key - p.n_pages * P);
++                acc[i] = q_sh[d] * float(data_kf[h * D + d + row * kf_stride]);
++            }
++        }
++    }
++
++    [[unroll]] for (uint i = 0u; i < 16u; ++i) part[i * D + d] = acc[i];
++    barrier();
++
++    if (d < 16u) {
++        const uint key = key0 + d;
++        if (key < p.n_kv) {
++            float s = 0.0;
++            [[unroll]] for (uint j = 0u; j < D; ++j) s += part[d * D + j];
++            data_l[(h * p.n_q + qi) * p.n_kv + key] = s * p.scale;
++        }
++    }
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/kitty_sv.comp b/src/ggml-vulkan/vulkan-shaders/kitty_sv.comp
+new file mode 100644
+index 00000000..cbf6391f
+--- /dev/null
++++ b/src/ggml-vulkan/vulkan-shaders/kitty_sv.comp
+@@ -0,0 +1,67 @@
++#version 450
++#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
++#extension GL_EXT_control_flow_attributes : enable
++
++layout (push_constant) uniform parameter {
++    uint n_kv;
++    uint n_sink;
++    uint n_vp;
++    uint n_vqbuf;
++    uint n_head;
++    uint n_q;
++    uint vf_row_stride;
++    uint pad0;
++} p;
++
++#include "types.glsl"
++
++layout(local_size_x = 8, local_size_y = 1, local_size_z = 1) in;
++
++layout(binding = 0) readonly  buffer S  { float     data_s[];  };  // probs [n_kv, n_q, n_head]
++layout(binding = 1) readonly  buffer VF { float16_t data_vf[]; };  // staging [D, n_head, sink+P]
++layout(binding = 2) readonly  buffer VP { uint      data_vp[]; };  // packed V blob
++layout(binding = 3) writeonly buffer O  { float     data_o[];  };  // [D, n_head, n_q]
++
++const uint D       = 128u;
++const uint P       = 128u;
++const uint V_OFF_META = 4096u;
++const uint V_HEAD     = 4608u;
++
++uint chan4(uint u, uint j) { return (u >> (((j / 4u) * 8u) + ((j % 4u) * 2u))) & 3u; }
++
++void main() {
++    const uint qi = gl_WorkGroupID.x;
++    const uint h  = gl_WorkGroupID.y;
++    const uint t  = gl_LocalInvocationID.x;       // 0..7 -> channels [16t, 16t+16)
++
++    const uint vf_stride = p.vf_row_stride;       // = n_embd_kv
++    const uint vq_head = p.n_vp % P;              // ring head
++    const uint row = (h * p.n_q + qi) * p.n_kv;
++
++    float acc[16];
++    [[unroll]] for (uint j = 0u; j < 16u; ++j) acc[j] = 0.0;
++
++    for (uint key = 0u; key < p.n_kv; ++key) {
++        const float prob = data_s[row + key];
++        if (key < p.n_sink) {
++            [[unroll]] for (uint j = 0u; j < 16u; ++j)
++                acc[j] += prob * float(data_vf[h * D + t * 16u + j + key * vf_stride]);
++        } else if (key < p.n_sink + p.n_vp) {
++            const uint rel = key - p.n_sink;
++            const uint pg  = rel / P, tt = rel % P;
++            const uint hb  = h * V_HEAD;
++            vec2 sm = unpackHalf2x16(data_vp[(hb + V_OFF_META + tt * 4u) / 4u]);
++            const uint u = data_vp[(hb + tt * (D / 4u) + t * 4u) / 4u];
++            [[unroll]] for (uint j = 0u; j < 16u; ++j)
++                acc[j] += prob * (float(chan4(u, j)) * sm.x + sm.y);
++        } else {
++            const uint i    = key - (p.n_sink + p.n_vp);
++            const uint slot = (vq_head + i) % P;
++            [[unroll]] for (uint j = 0u; j < 16u; ++j)
++                acc[j] += prob * float(data_vf[h * D + t * 16u + j + (p.n_sink + slot) * vf_stride]);
++        }
++    }
++
++    [[unroll]] for (uint j = 0u; j < 16u; ++j)
++        data_o[(qi * p.n_head + h) * D + t * 16u + j] = acc[j];
++}
+diff --git a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+index 7597b3d3..94c8dbec 100644
+--- a/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
++++ b/src/ggml-vulkan/vulkan-shaders/vulkan-shaders-gen.cpp
+@@ -1077,6 +1077,9 @@ void process_shaders() {
+     string_to_spv("soft_max_large2_f32_f16", "soft_max_large2.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+     string_to_spv("soft_max_large3_f32_f16", "soft_max_large3.comp", merge_maps(base_dict, {{"A_TYPE", "float"}, {"B_TYPE", "float16_t"}, {"D_TYPE", "float"}}));
+ 
++    string_to_spv("kitty_qk_f32", "kitty_qk.comp", merge_maps(base_dict, {{"A_TYPE", "float"}}));
++    string_to_spv("kitty_sv_f32", "kitty_sv.comp", merge_maps(base_dict, {{"A_TYPE", "float"}}));
++
+     string_to_spv("rope_norm_f32", "rope_norm.comp", {{"A_TYPE", "float"}, {"ROPE_D_TYPE", "float"}});
+     string_to_spv("rope_norm_f16", "rope_norm.comp", {{"A_TYPE", "float16_t"}, {"ROPE_D_TYPE", "float16_t"}});
+     string_to_spv("rope_norm_f32_f16", "rope_norm.comp", {{"A_TYPE", "float"}, {"ROPE_D_TYPE", "float16_t"}});
+diff --git a/src/ggml.c b/src/ggml.c
+index 9bcabdbd..4d7f3a21 100644
+--- a/src/ggml.c
++++ b/src/ggml.c
+@@ -1099,9 +1099,12 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
+     "OPT_STEP_SGD",
+ 
+     "GLU",
++
++    "KITTY_QK",
++    "KITTY_SV",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
++static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
+ 
+ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "none",
+@@ -1214,9 +1217,12 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
+     "sgd(x)",
+ 
+     "glu(x)",
++
++    "kitty_qk(q,k,kp)",
++    "kitty_sv(p,v,vp)",
+ };
+ 
+-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
++static_assert(GGML_OP_COUNT == 103, "GGML_OP_COUNT != 103");
+ 
+ static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
+ 
+@@ -5547,6 +5553,62 @@ struct ggml_tensor * ggml_flash_attn_ext(
+     return result;
+ }
+ 
++// loopcd M7c: packed Kitty-KV ops.
++
++struct ggml_tensor * ggml_kitty_qk(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * q,
++        struct ggml_tensor  * k_f16,
++        struct ggml_tensor  * k_planes,
++        int32_t               n_sink,
++        int32_t               n_qbuf,
++        int32_t               n_pages,
++        float                 scale) {
++    GGML_ASSERT(q->type == GGML_TYPE_F32);
++    GGML_ASSERT(k_f16->type == GGML_TYPE_F16);
++    GGML_ASSERT(k_planes->type == GGML_TYPE_I8);
++    GGML_ASSERT(q->ne[0] == 128);   // head_dim is fixed by the packed layout
++
++    const int64_t n_kv = (int64_t) n_sink + (int64_t) n_pages * 128 + n_qbuf;
++    int64_t ne[4] = { n_kv, q->ne[2], q->ne[1], 1 };
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
++
++    struct { int32_t n_sink, n_qbuf, n_pages; float scale; } params = { n_sink, n_qbuf, n_pages, scale };
++    ggml_set_op_params(result, &params, sizeof(params));
++
++    result->op     = GGML_OP_KITTY_QK;
++    result->src[0] = q;
++    result->src[1] = k_f16;
++    result->src[2] = k_planes;
++    return result;
++}
++
++struct ggml_tensor * ggml_kitty_sv(
++        struct ggml_context * ctx,
++        struct ggml_tensor  * probs,
++        struct ggml_tensor  * v_f16,
++        struct ggml_tensor  * v_planes,
++        int32_t               n_sink,
++        int32_t               n_vp,
++        int32_t               n_vqbuf) {
++    GGML_ASSERT(probs->type == GGML_TYPE_F32);
++    GGML_ASSERT(v_f16->type == GGML_TYPE_F16);
++    GGML_ASSERT(v_planes->type == GGML_TYPE_I8);
++    GGML_ASSERT(probs->ne[0] == (int64_t) n_sink + n_vp + n_vqbuf);
++
++    int64_t ne[4] = { 128, probs->ne[2], probs->ne[1], 1 };
++    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
++
++    struct { int32_t n_sink, n_vp, n_vqbuf, pad; } params = { n_sink, n_vp, n_vqbuf, 0 };
++    ggml_set_op_params(result, &params, sizeof(params));
++
++    result->op     = GGML_OP_KITTY_SV;
++    result->src[0] = probs;
++    result->src[1] = v_f16;
++    result->src[2] = v_planes;
++    return result;
++}
++
+ 
+ void ggml_flash_attn_ext_set_prec(
+         struct ggml_tensor * a,

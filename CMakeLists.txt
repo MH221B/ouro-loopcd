@@ -14,11 +14,21 @@ endif()
 include(FetchContent)
 
 # Pin ggml to a known commit. Bump deliberately, never track a branch.
-# Offline/speed: -DFETCHCONTENT_SOURCE_DIR_GGML=C:/Users/tnmh/projects/ggml
+#
+# M7 adds two ops (KITTY_QK / KITTY_SV) that are not upstream at this pin, so the change is
+# carried as a patch applied right after checkout: pinned SHA + fixed patch is deterministic,
+# needs no second repository, and reads as a reviewable diff. tools/ggml-kitty-ops.patch is
+# the only delta from upstream ggml.
+#
+# Offline/speed: -DFETCHCONTENT_SOURCE_DIR_GGML=<a CLEAN checkout of the pin>. The patch is
+# applied to whatever source directory is used, so that directory must not already contain
+# the ops (pointing it at an already-patched tree will fail the patch step).
 FetchContent_Declare(
     ggml
     GIT_REPOSITORY https://github.com/ggml-org/ggml.git
     GIT_TAG        ffa4e8b80930029a35991f94e7c8a93cd67730ab
+    PATCH_COMMAND  ${CMAKE_COMMAND} -E chdir <SOURCE_DIR> git apply --whitespace=nowarn
+                   ${CMAKE_CURRENT_SOURCE_DIR}/tools/ggml-kitty-ops.patch
 )
 # M2: Vulkan is the shipping backend. -DLOOPCD_VULKAN=OFF builds a CPU-only binary.
 option(LOOPCD_VULKAN "loopcd: build the Vulkan backend (requires the Vulkan SDK)" ON)
