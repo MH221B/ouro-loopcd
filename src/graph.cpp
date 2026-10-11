@@ -1,5 +1,6 @@
 #include "graph.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -96,20 +97,52 @@ bool ouro_forward_kv(ouro_model & m, ouro_kv_cache & kv, const std::vector<int32
             K3 = ggml_rope_ext(ctx, K3, inp_pos, nullptr, hd, GGML_ROPE_TYPE_NORMAL,
                                0, hp.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
 
+            const bool packed = kv.kitty && kv.kitty_cfg.packed;
+            const int  sink   = kv.kitty_cfg.sink;
+
+            // Staging write row: the sink fills first, then the pending page / V ring.
+            // For packed K and V these coincide (see the M7b plan, decision #1); for
+            // plain/f16 the row is just n_past.
+            int stage_row = n_past;
+            if (packed && n_past >= sink) {
+                stage_row = sink + (n_past - sink - (int) kv.kitty_k_pages * 128);
+            }
+
             // write the new rows into this slot; expand now so the write precedes the read
             {
                 ggml_tensor * K2 = ggml_view_2d(ctx, K3, kv.n_embd_kv, n, K3->nb[2], 0);
                 ggml_tensor * V2 = ggml_view_2d(ctx, V3, kv.n_embd_kv, n, V3->nb[2], 0);
-                ggml_build_forward_expand(gf, ggml_cpy(ctx, K2, ouro_kv_k_write(kv, ctx, slot, n_past, n)));
-                ggml_build_forward_expand(gf, ggml_cpy(ctx, V2, ouro_kv_v_write(kv, ctx, slot, n_past, n)));
+                if (packed) {
+                    ggml_build_forward_expand(gf, ggml_cpy(ctx, K2, ouro_kv_kitty_write(kv, ctx, slot, stage_row, n, false)));
+                    ggml_build_forward_expand(gf, ggml_cpy(ctx, V2, ouro_kv_kitty_write(kv, ctx, slot, stage_row, n, true)));
+                } else {
+                    ggml_build_forward_expand(gf, ggml_cpy(ctx, K2, ouro_kv_k_write(kv, ctx, slot, n_past, n)));
+                    ggml_build_forward_expand(gf, ggml_cpy(ctx, V2, ouro_kv_v_write(kv, ctx, slot, n_past, n)));
+                }
             }
 
-            // attend over the whole slot [0, n_kv)
-            ggml_tensor * Qp = ggml_permute(ctx, Q3, 0, 2, 1, 3);                        // [hd, n, nh, 1]
-            ggml_tensor * Kc = ggml_permute(ctx, ouro_kv_k(kv, ctx, slot, n_kv), 0, 2, 1, 3); // [hd, n_kv, nh, 1]
-            ggml_tensor * Vc = ggml_permute(ctx, ouro_kv_v(kv, ctx, slot, n_kv), 0, 2, 1, 3); // [hd, n_kv, nh, 1]
+            if (packed) {
+                const int n_sink    = std::min(n_kv, sink);
+                const int n_kpages  = (int) kv.kitty_k_pages;   // pre-pack count
+                const int n_kpending= n_kv - n_sink - n_kpages * 128;
+                const int n_vp      = (int) kv.kitty_v_packed;
+                const int n_vqbuf   = n_kv - n_sink - n_vp;
 
-            cur = flash_attn(ctx, Qp, Kc, Vc, mask, hd, nh, n, scale);
+                ggml_tensor * k_f16 = ouro_kv_kitty_f16(kv, ctx, slot, n_sink + n_kpending, false);
+                ggml_tensor * v_f16 = ouro_kv_kitty_f16(kv, ctx, slot, n_sink + 128, true);
+                ggml_tensor * k_pl  = ouro_kv_kitty_planes(kv, slot, false);
+                ggml_tensor * v_pl  = ouro_kv_kitty_planes(kv, slot, true);
+
+                ggml_tensor * logits = ggml_kitty_qk(ctx, Q3, k_f16, k_pl, n_sink, n_kpending, n_kpages, scale);
+                ggml_tensor * probs  = ggml_soft_max_ext(ctx, logits, mask, 1.0f, 0.0f);
+                ggml_tensor * sv     = ggml_kitty_sv(ctx, probs, v_f16, v_pl, n_sink, n_vp, n_vqbuf);
+                cur = ggml_reshape_2d(ctx, sv, hd * nh, n);
+            } else {
+                ggml_tensor * Qp = ggml_permute(ctx, Q3, 0, 2, 1, 3);                        // [hd, n, nh, 1]
+                ggml_tensor * Kc = ggml_permute(ctx, ouro_kv_k(kv, ctx, slot, n_kv), 0, 2, 1, 3); // [hd, n_kv, nh, 1]
+                ggml_tensor * Vc = ggml_permute(ctx, ouro_kv_v(kv, ctx, slot, n_kv), 0, 2, 1, 3); // [hd, n_kv, nh, 1]
+                cur = flash_attn(ctx, Qp, Kc, Vc, mask, hd, nh, n, scale);
+            }
             cur = ggml_mul_mat(ctx, L.attn_output, cur);
             cur = rms_norm(ctx, cur, L.attn_post_norm, hp.eps);
 
