@@ -73,7 +73,11 @@ int ouro_generator::next(int32_t & out, std::string & err) {
                 if (pos < sink) {
                     c = std::min(sink - pos, (int) prompt.size() - pos);
                 } else {
-                    const int pending = pos - (sink + (int) kv->kitty_k_pages * P);
+                    // Chunk boundaries must be the same for both storages (decision #6), and
+                    // the packed page cursor `kitty_k_pages` never advances in f16 mode, so
+                    // derive the pending from the position instead: at every chunk start
+                    // pos-sink is a multiple of P, so this matches the packed formula.
+                    const int pending = (pos - sink) % P;
                     c = std::min(P - pending, (int) prompt.size() - pos);
                 }
                 const std::vector<int32_t> chunk(prompt.begin() + pos, prompt.begin() + pos + c);
