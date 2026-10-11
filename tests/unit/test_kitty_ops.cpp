@@ -79,7 +79,7 @@ static void reference_attention(const std::vector<float> & q, int hd, int nh, in
         }
         // attention per query
         for (int qi = 0; qi < nq; ++qi) {
-            const float * qh = q.data() + ((size_t) h * nq + qi) * hd;
+            const float * qh = q.data() + ((size_t) qi * nh + h) * hd;
             std::vector<float> logit(n_kv);
             float mx = -INFINITY;
             for (int key = 0; key < n_kv; ++key) {
@@ -92,7 +92,7 @@ static void reference_attention(const std::vector<float> & q, int hd, int nh, in
             for (int d = 0; d < hd; ++d) {
                 float acc = 0.0f;
                 for (int key = 0; key < n_kv; ++key) acc += logit[key] / sum * vd[((size_t) h * n_kv + key) * hd + d];
-                out[((size_t) h * nq + qi) * hd + d] = acc;
+                out[((size_t) qi * nh + h) * hd + d] = acc;
             }
         }
     }
@@ -137,7 +137,7 @@ static bool run_ops(ggml_backend_t backend, ouro_kv_cache & kv, int slot,
 }
 
 int main() {
-    const int hd = 128, nh = 16, nq = 1, sink = 32, P_ = P;
+    const int hd = 128, nh = 16, nq = 3, sink = 32, P_ = P;   // nq > 1 exercises the (head,query) indexing
     ggml_backend_t cpu = ggml_backend_cpu_init();
     if (!cpu) { printf("FAIL cpu\n"); return 1; }
 
