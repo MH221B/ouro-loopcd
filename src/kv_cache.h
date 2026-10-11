@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 
 #include <string>
+#include <random>
 #include <vector>
 
 // M6 Kitty-KV config. nullptr (or kitty=false) means the cache is a plain f16/q8_0 cache.
@@ -16,6 +17,7 @@ struct ouro_kitty_config {
     int boost_bits    = 4;
     bool random_select= false;
     unsigned long long seed = 1234;
+    bool packed       = true;  // true => packed 2-bit planes; false => M6 f16 fake-quant
 };
 
 // The cached K/V for one logical layer occupies one slot, because K/V differ per loop.
@@ -34,11 +36,19 @@ struct ouro_kv_cache {
     ggml_type type  = GGML_TYPE_Q8_0; // q8_0 (default), f16, or f32
     ggml_context * ctx = nullptr;     // owns the k/v tensor structs
     ggml_backend_buffer_t buf = nullptr; // owns the k/v data
-    // M7a: one tensor per slot, so the allocator can split the cache into
-    // buffers smaller than the Vulkan per-allocation limit. Each entry is
-    // [n_embd_kv, n_ctx]. See docs/superpowers/specs/2026-10-11-loopcd-m7-packed-kv-design.md §6.
-    std::vector<ggml_tensor *> k;     // n_slots tensors of [n_embd_kv, n_ctx]
-    std::vector<ggml_tensor *> v;     // n_slots tensors of [n_embd_kv, n_ctx]
+    // M7a: one staging tensor per slot so the allocator can split the cache into
+    // buffers smaller than the Vulkan per-allocation limit. For plain/q8_0/f16 these
+    // are [n_embd_kv, n_ctx]; for kitty-packed they are the small f16 staging tensors
+    // [n_embd_kv, sink + P] (spec §5.1). See the M7 design §5-§6.
+    std::vector<ggml_tensor *> k;     // n_slots tensors
+    std::vector<ggml_tensor *> v;     // n_slots tensors
+
+    // M7b packed kitty storage (valid when kitty && kitty_cfg.packed).
+    std::vector<ggml_tensor *> k_planes;  // n_slots I8 blobs, [n_pages_max * k_page_bytes(H)]
+    std::vector<ggml_tensor *> v_planes;  // n_slots I8 blobs, [n_pages_max * v_page_bytes(H)]
+    long long kitty_k_pages = 0;   // completed K pages packed (positions [sink, sink+k_pages*P))
+    long long kitty_v_packed = 0;  // V positions packed (positions [sink, sink+v_packed))
+    std::mt19937_64 kitty_rng;     // seeded once at init, advanced (never reseeded) per call
 
     // M6: fake-quantize the f16 cache after each forward.
     bool kitty = false;              // valid when kitty == true
@@ -67,3 +77,14 @@ ggml_tensor * ouro_kv_v(const ouro_kv_cache & kv, ggml_context * ctx, int slot, 
 // Feed to ggml_cpy with a [n_embd_kv, n_tokens] f32 source. Contiguous.
 ggml_tensor * ouro_kv_k_write(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_past, int n_tokens);
 ggml_tensor * ouro_kv_v_write(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_past, int n_tokens);
+
+// ---- M7b packed kitty accessors (valid when kv.kitty && kv.kitty_cfg.packed) ----
+// Staging write view for a chunk starting at staging `row`, length `n_tokens`:
+// [n_embd_kv, n_tokens]. `row` is sink+pending for K and the ring offset for V.
+ggml_tensor * ouro_kv_kitty_write(const ouro_kv_cache & kv, ggml_context * ctx, int slot,
+                                  int row, int n_tokens, bool is_v);
+// Staging read view [head_dim, n_head_kv, n_rows, 1] over staging rows [0, n_rows).
+ggml_tensor * ouro_kv_kitty_f16(const ouro_kv_cache & kv, ggml_context * ctx, int slot,
+                                int n_rows, bool is_v);
+// The packed plane blob for `slot` (I8, 1-D).
+ggml_tensor * ouro_kv_kitty_planes(const ouro_kv_cache & kv, int slot, bool is_v);

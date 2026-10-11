@@ -28,7 +28,7 @@ int main() {
 
     ggml_backend_t cpu = ggml_backend_cpu_init();
     ouro_kv_cache kv; std::string err;
-    ouro_kitty_config c; c.sink = 0; c.page = Pp; c.boost_channels = DB; c.kbits = KB; c.boost_bits = BB; c.vbits = 16;
+    ouro_kitty_config c; c.sink = 0; c.page = Pp; c.boost_channels = DB; c.kbits = KB; c.boost_bits = BB; c.vbits = 16; c.packed = false;
     const bool ok = ouro_kv_cache_init(kv, cpu, Dd, Hh, /*n_ctx=*/Pp, /*n_slots=*/1, GGML_TYPE_F16, &c, err);
     printf(ok ? "ok   init\n" : "FAIL init: %s\n", err.c_str());
     if (!ok) { ggml_backend_free(cpu); return 1; }
