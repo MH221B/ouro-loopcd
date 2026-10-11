@@ -6,6 +6,7 @@
 #include "generate.h"
 #include "sampling.h"
 #include "server.h"
+#include "kitty_kv.h"
 #include "ggml-backend.h"
 
 #include <cstdio>
@@ -66,15 +67,6 @@ static bool parse_kitty_flags(int argc, char ** argv, ouro_kitty_config & c, std
         { err = "kitty: bad bit widths"; return false; }
     if (c.page <= 0) { err = "kitty: page must be > 0"; return false; }
     return true;
-}
-
-static int argmax_col(ggml_tensor * z, int col) {
-    const int V = (int) z->ne[0];
-    std::vector<float> buf(V);
-    ggml_backend_tensor_get(z, buf.data(), (size_t) col * V * sizeof(float), V * sizeof(float));
-    int best = 0;
-    for (int i = 1; i < V; ++i) if (buf[i] > buf[best]) best = i;
-    return best;
 }
 
 static ouro_loopcd_mode parse_loopcd_mode(const std::string & s, std::string & err) {
@@ -165,11 +157,22 @@ int main(int argc, char ** argv) {
     return 1;
 }
 
-static void dump_f32(const std::string & path, ggml_tensor * t) {
-    std::vector<float> buf((size_t) ggml_nelements(t));
-    ggml_backend_tensor_get(t, buf.data(), 0, ggml_nbytes(t));
-    std::ofstream f(path, std::ios::binary);
-    f.write((const char *) buf.data(), (std::streamsize) (buf.size() * sizeof(float)));
+// Copy a whole tensor into `dst` ([dim, n] layout: element (d, j) at j*dim + d).
+static void read_all(ggml_tensor * t, std::vector<float> & dst) {
+    dst.resize((size_t) ggml_nelements(t));
+    ggml_backend_tensor_get(t, dst.data(), 0, ggml_nbytes(t));
+}
+
+// Copy tensor column `col` ([dim] values) into dst at column `col` (dim = t->ne[0]).
+static void copy_col(ggml_tensor * t, std::vector<float> & dst, int col) {
+    const int D = (int) t->ne[0];
+    ggml_backend_tensor_get(t, dst.data() + (size_t) col * D, 0, (size_t) D * sizeof(float));
+}
+
+static int argmax_vec(const std::vector<float> & v, int col, int D) {
+    int best = 0;
+    for (int i = 1; i < D; ++i) if (v[(size_t) col * D + i] > v[(size_t) col * D + best]) best = i;
+    return best;
 }
 
 // Escape backslashes/quotes so a Windows path is valid inside a JSON string.
@@ -223,21 +226,39 @@ static int cmd_logits(int argc, char ** argv) {
         fprintf(stderr, "error: %s\n", err.c_str()); return 1;
     }
 
-    ouro_graph_outputs out;
-    if (!ouro_forward_kv(m, kv, tokens, /*n_past=*/0, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-
     const int n = (int) tokens.size();
     const int V = m.hp.n_vocab;
     const int H = m.hp.n_embd;
 
-    const int best = argmax_col(out.zR, n - 1);
+    // The host-side Kitty quantizer runs after a forward, so a single dense prefill cannot
+    // exercise it (attention would read the unquantized rows). In kitty mode, process the
+    // prompt decode-style (one token per forward, quantizing after each) and accumulate the
+    // per-position taps, so each position's logits see the Kitty-quantized history. The
+    // non-kitty path is the original single dense prefill.
+    std::vector<float> zR, z1, h1, hR;
+    if (kitty) {
+        zR.assign((size_t) V * n, 0.0f); z1.assign((size_t) V * n, 0.0f);
+        h1.assign((size_t) H * n, 0.0f); hR.assign((size_t) H * n, 0.0f);
+        for (int i = 0; i < n; ++i) {
+            ouro_graph_outputs o;
+            if (!ouro_forward_kv(m, kv, { tokens[i] }, /*n_past=*/i, R, o, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            if (!ouro_kv_kitty_quantize(kv, i + 1, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            copy_col(o.zR, zR, i); copy_col(o.z1, z1, i); copy_col(o.h1, h1, i); copy_col(o.hR, hR, i);
+        }
+    } else {
+        ouro_graph_outputs out;
+        if (!ouro_forward_kv(m, kv, tokens, /*n_past=*/0, R, out, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+        read_all(out.zR, zR); read_all(out.z1, z1); read_all(out.h1, h1); read_all(out.hR, hR);
+    }
+
+    const int best = argmax_vec(zR, n - 1, V);
     printf("device=%s kv=%s loops=%d n_tokens=%d argmax(zR[-1])=%d\n", device.c_str(), kv_str.c_str(), R, n, best);
 
     if (!dump.empty()) {
-        dump_f32(dump + ".zR.bin", out.zR);
-        dump_f32(dump + ".z1.bin", out.z1);
-        dump_f32(dump + ".h1.bin", out.h1);
-        dump_f32(dump + ".hR.bin", out.hR);
+        dump_f32_vec(dump + ".zR.bin", zR);
+        dump_f32_vec(dump + ".z1.bin", z1);
+        dump_f32_vec(dump + ".h1.bin", h1);
+        dump_f32_vec(dump + ".hR.bin", hR);
         std::ofstream j(dump + ".meta.json");
         const std::string d = json_escape(dump);   // keep M1's Windows-path escaping
         j << "{\n";
