@@ -239,10 +239,17 @@ static int cmd_logits(int argc, char ** argv) {
     if (kitty) {
         zR.assign((size_t) V * n, 0.0f); z1.assign((size_t) V * n, 0.0f);
         h1.assign((size_t) H * n, 0.0f); hR.assign((size_t) H * n, 0.0f);
+        const bool packed = kv.kitty && kv.kitty_cfg.packed;
         for (int i = 0; i < n; ++i) {
             ouro_graph_outputs o;
+            const int n_kv_new = i + 1;
+            if (packed && !ouro_kv_kitty_pack_evict(kv, n_kv_new, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
             if (!ouro_forward_kv(m, kv, { tokens[i] }, /*n_past=*/i, R, o, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
-            if (!ouro_kv_kitty_quantize(kv, i + 1, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            if (packed) {
+                if (!ouro_kv_kitty_pack_pages(kv, n_kv_new, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            } else {
+                if (!ouro_kv_kitty_quantize(kv, n_kv_new, err)) { fprintf(stderr, "error: %s\n", err.c_str()); return 1; }
+            }
             copy_col(o.zR, zR, i); copy_col(o.z1, z1, i); copy_col(o.h1, h1, i); copy_col(o.hR, hR, i);
         }
     } else {
