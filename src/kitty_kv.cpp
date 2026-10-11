@@ -57,13 +57,15 @@ bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
                                     (size_t) E * c.page * sizeof(ggml_fp16_t));
             for (size_t i = 0; i < buf.size(); ++i) f[i] = ggml_fp16_to_fp32(buf[i]);
             for (int h = 0; h < H; ++h) {
-                // channel scores = mean |k| over the page
-                std::vector<std::pair<float,int>> score(D);
+                // channel scores = mean |k| over the page. Stored as double to match the
+                // packed emitter's select_boost exactly (Both-modes requirement): a float
+                // score would rank near-ties differently and promote a different channel set.
+                std::vector<std::pair<double,int>> score(D);
                 for (int d = 0; d < D; ++d) {
                     double acc = 0.0;
                     for (int t = 0; t < c.page; ++t)
                         acc += std::fabs((double) f[(size_t) t * E + h * D + d]);
-                    score[d] = { (float) (acc / c.page), d };
+                    score[d] = { acc / c.page, d };
                 }
                 std::vector<char> boost(D, 0);
                 int d_boosted = std::min(c.boost_channels, D);
