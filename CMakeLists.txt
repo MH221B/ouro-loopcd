@@ -104,6 +104,11 @@ target_link_libraries(test_kitty PRIVATE ggml::ggml)
 add_test(NAME kitty COMMAND test_kitty)
 set_tests_properties(kitty PROPERTIES WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
+add_executable(test_cache_alloc tests/unit/test_cache_alloc.cpp src/kv_cache.cpp)
+target_include_directories(test_cache_alloc PRIVATE src)
+target_link_libraries(test_cache_alloc PRIVATE ggml::ggml)
+add_test(NAME cache_alloc COMMAND test_cache_alloc)
+
 add_executable(test_tokenizer tests/unit/test_tokenizer.cpp src/tokenizer.cpp src/unicode.cpp src/unicode-data.cpp)
 target_include_directories(test_tokenizer PRIVATE src)
 target_link_libraries(test_tokenizer PRIVATE ggml::ggml)
