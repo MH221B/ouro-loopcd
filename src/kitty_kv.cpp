@@ -198,7 +198,7 @@ static bool pack_k_page(ouro_kv_cache & kv, int pg) {
 
     std::vector<ggml_fp16_t> stage((size_t) E * P);
     std::vector<uint8_t> page(page_bytes);
-    std::vector<float> col((size_t) P);
+    std::vector<float> col((size_t) D_ * P);   // one head's [D, P] page (indexed d*P + t)
     std::vector<uint8_t> q, boost_idx;
     std::vector<int> rank;
 
