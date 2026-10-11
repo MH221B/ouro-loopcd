@@ -36,7 +36,7 @@ bool ouro_generator::begin(ouro_model & model, ouro_kv_cache & cache, const std:
 
 int ouro_generator::sample_from(int col, int32_t & out, std::string & err) {
     // Read the raw taps for the dump BEFORE the hidden head pass can clobber them.
-    const bool dump_col = first_guided.empty() && col == (int) prompt.size() - 1;
+    const bool dump_col = first_guided.empty() && col == (int) taps.zR->ne[1] - 1;
     if (dump_col) {
         read_col(taps.zR, col, first_unguided);
         read_col(taps.z1, col, first_z1);
@@ -57,6 +57,9 @@ int ouro_generator::next(int32_t & out, std::string & err) {
 
     if (!prefilled) {
         if (gp.max_tokens <= 0) { done = true; return 0; }
+        // The taps cover only the last forward's tokens: the dense prefill below is one
+        // forward over the whole prompt, the chunked one ends at the last chunk.
+        int last_c = (int) prompt.size();
         if (!kv->kitty) {
             // plain / q8_0 / f16: one dense prefill, exactly as before
             if (!ouro_forward_kv(*m, *kv, prompt, /*n_past=*/0, R, taps, err)) return -1;
@@ -74,6 +77,7 @@ int ouro_generator::next(int32_t & out, std::string & err) {
                     c = std::min(P - pending, (int) prompt.size() - pos);
                 }
                 const std::vector<int32_t> chunk(prompt.begin() + pos, prompt.begin() + pos + c);
+                last_c = c;
                 const int n_kv_new = pos + c;
                 // V eviction must precede the write (its ring row is about to be reused).
                 if (packed && !ouro_kv_kitty_pack_evict(*kv, n_kv_new, err)) return -1;
@@ -88,7 +92,10 @@ int ouro_generator::next(int32_t & out, std::string & err) {
         }
         n_past = (int) prompt.size();
         prefilled = true;
-        if (sample_from(n_past - 1, out, err) < 0) return -1;
+        // The taps hold only the LAST chunk's outputs ([V, last_c]). The old
+        // `n_past - 1` indexes a column that does not exist for any multi-chunk
+        // prompt (i.e. any prompt longer than `sink`), and read out of bounds.
+        if (sample_from(last_c - 1, out, err) < 0) return -1;
     } else {
         if ((int) out_ids.size() >= gp.max_tokens) { done = true; return 0; }
         if (n_past >= ctx) { done = true; return 0; }
