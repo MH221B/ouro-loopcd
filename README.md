@@ -26,15 +26,7 @@ Ouro is a looped transformer. It has 48 layers and applies them R times. Each pa
 weights. The model does its reasoning inside the loop. It does not write that reasoning into the
 output tokens. The model was trained at R=4.
 
-```mermaid
-flowchart LR
-    H0["h_0 input"] --> L1["loop 1<br/>48 layers"]
-    L1 --> L2["loop 2<br/>48 layers"]
-    L2 --> L3["..."]
-    L3 --> LR["loop R<br/>48 layers"]
-    LR --> ZR["z_R<br/>final answer"]
-    L1 -. tap .-> Z1["z_1<br/>first answer"]
-```
+![The Ouro loop. The 48 layers run R times, and LoopCD taps the answers at loop 1 and loop R.](images/loop.png)
 
 LoopCD is the method this project tests. At each decode step the model already holds two answers:
 one after loop 1, and one after loop R. LoopCD samples from neither. It pushes probability away
@@ -241,6 +233,7 @@ tests/
                 allocation, and the kitty pack, ops, and equivalence checks
   eval/         measurement harness: run_eval.py, score.py, report.py, items/, RESULTS.md
 third_party/    vendored cpp-httplib and nlohmann/json
+images/         diagram sources (.mmd) and the rendered PNGs used in this README
 ```
 
 [optimization.md](optimization.md) at the repo root is the design for the unfinished packed-KV

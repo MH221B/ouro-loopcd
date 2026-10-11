@@ -1,0 +1,8 @@
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryTextColor':'#1f2328','primaryBorderColor':'#57606a','lineColor':'#57606a','edgeLabelBackground':'#ffffff','fontFamily':'Segoe UI, Helvetica, Arial, sans-serif','fontSize':'16px'}}}%%
+flowchart LR
+    H0["h_0 input"] --> L1["loop 1<br/>48 layers"]
+    L1 --> L2["loop 2<br/>48 layers"]
+    L2 --> L3["..."]
+    L3 --> LR["loop R<br/>48 layers"]
+    LR --> ZR["z_R<br/>final answer"]
+    L1 -. tap .-> Z1["z_1<br/>first answer"]
