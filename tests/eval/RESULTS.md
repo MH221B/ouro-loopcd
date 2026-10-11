@@ -121,9 +121,11 @@ is f16 and equals the f16 row.
   failure** — nothing below implies it ran.
 - `kitty_shipping` is **ctx 2048**, while the `shipping` baseline is **ctx 4096**: this is a
   per-ctx observation, not a straight A/B at 4096. The ctx was reduced because a ctx-4096
-  kitty cache is f16 → one K/V tensor is 3.00 GiB and the Vulkan driver rejects a single
-  allocation that large (`ErrorOutOfDeviceMemory`); at ctx 2048 it is 1.5 GiB and fits. The
-  memory win that would make 4096 viable is M7's.
+  kitty cache is f16 → one K/V tensor is 3.00 GiB and **ggml** rejects a buffer that large
+  (`ggml-vulkan-buffers.cpp:31`, from the driver's advertised `maxBufferSize` = 2 GiB) with
+  `ErrorOutOfDeviceMemory`; at ctx 2048 it is 1.5 GiB and fits. **The driver itself does not
+  impose this limit** (it accepts a single 4 GiB allocation). M7a fixed it by allocating one
+  tensor per slot; see `docs/superpowers/plans/2026-10-11-loopcd-m7-alloc-probe.md`.
 - The oracle's K-dequant scatter bug (fixed in commit `3d76f4f`) was **already applied when the
   R=4/R=2 gate was run**: the buggy version raises a size-mismatch `RuntimeError` the moment a
   page completes, so `kitty.r4.json`/`kitty.r2.json` could not have been produced by it. The
