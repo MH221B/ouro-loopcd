@@ -38,7 +38,7 @@ static void quant_channel(std::vector<float> & x, int stride, int P, int bits) {
 bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
     if (!kv.kitty) return true;
     const auto & c = kv.kitty_cfg;
-    const int H = kv.n_head_kv, D = kv.head_dim, E = kv.n_embd_kv, ctx = kv.n_ctx, S = kv.n_slots;
+    const int H = kv.n_head_kv, D = kv.head_dim, E = kv.n_embd_kv, S = kv.n_slots;
     if (c.page <= 0) { err = "kitty: page must be > 0"; return false; }
 
     std::mt19937_64 rng(c.seed);
@@ -51,8 +51,8 @@ bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
     while (a < n_kv && ((a - c.sink) % c.page) != 0) ++a;    // align past the sink
     for (; a + c.page <= n_kv; a += c.page) {
         for (int s = 0; s < S; ++s) {
-            const size_t off = ((size_t) s * ctx + a) * row_bytes();
-            ggml_backend_tensor_get(kv.k, buf.data(), off, (size_t) E * c.page * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_get(kv.k[s], buf.data(), (size_t) a * row_bytes(),
+                                    (size_t) E * c.page * sizeof(ggml_fp16_t));
             for (size_t i = 0; i < buf.size(); ++i) f[i] = ggml_fp16_to_fp32(buf[i]);
             for (int h = 0; h < H; ++h) {
                 // channel scores = mean |k| over the page
@@ -85,7 +85,8 @@ bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
                 }
             }
             for (size_t i = 0; i < f.size(); ++i) buf[i] = ggml_fp32_to_fp16(f[i]);
-            ggml_backend_tensor_set(kv.k, buf.data(), off, (size_t) E * c.page * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(kv.k[s], buf.data(), (size_t) a * row_bytes(),
+                                    (size_t) E * c.page * sizeof(ggml_fp16_t));
         }
     }
     kv.kitty_k_done = a;
@@ -97,8 +98,8 @@ bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
         const int T = (int) (vstop - vstart);
         std::vector<ggml_fp16_t> vbuf((size_t) E * T);
         for (int s = 0; s < S; ++s) {
-            const size_t off = ((size_t) s * ctx + vstart) * row_bytes();
-            ggml_backend_tensor_get(kv.v, vbuf.data(), off, vbuf.size() * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_get(kv.v[s], vbuf.data(), (size_t) vstart * row_bytes(),
+                                    vbuf.size() * sizeof(ggml_fp16_t));
             // per-token, per-head group over head_dim
             for (int t = 0; t < T; ++t) {
                 for (int h = 0; h < H; ++h) {
@@ -118,7 +119,8 @@ bool ouro_kv_kitty_quantize(ouro_kv_cache & kv, int n_kv, std::string & err) {
                     }
                 }
             }
-            ggml_backend_tensor_set(kv.v, vbuf.data(), off, vbuf.size() * sizeof(ggml_fp16_t));
+            ggml_backend_tensor_set(kv.v[s], vbuf.data(), (size_t) vstart * row_bytes(),
+                                    vbuf.size() * sizeof(ggml_fp16_t));
         }
         kv.kitty_v_done = vstop;
     }

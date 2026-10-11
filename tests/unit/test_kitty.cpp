@@ -48,7 +48,7 @@ int main() {
     if (!ouro_kv_kitty_quantize(kv, Pp, err)) { printf("FAIL quantize: %s\n", err.c_str()); g_fail = 1; }
 
     std::vector<ggml_fp16_t> got((size_t) E * Pp);
-    ggml_backend_tensor_get(kv.k, got.data(), 0, got.size() * sizeof(ggml_fp16_t));
+    ggml_backend_tensor_get(kv.k[0], got.data(), 0, got.size() * sizeof(ggml_fp16_t));
 
     double maxd = 0.0;
     for (size_t i = 0; i < got.size(); ++i)

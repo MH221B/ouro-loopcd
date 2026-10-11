@@ -3,21 +3,23 @@
 
 #include <cstdio>
 
-static ggml_tensor * kv_read_view(ggml_context * ctx, ggml_tensor * cache, ggml_type type,
-                                  int head_dim, int n_embd_kv, int n_ctx,
-                                  int slot, int n_kv) {
+// Per-head view of ONE slot tensor: [head_dim, n_head_kv, n_kv, 1].
+// nb1 = stride between heads (they are contiguous inside a row);
+// nb2 = stride between positions (one full row per position).
+static ggml_tensor * kv_read_view(ggml_context * ctx, ggml_tensor * slot_tensor, ggml_type type,
+                                  int head_dim, int n_embd_kv, int n_kv) {
     const size_t rs_head = ggml_row_size(type, head_dim);
     const size_t rs_row  = ggml_row_size(type, n_embd_kv);
-    const size_t rs_slot = rs_row * (size_t) n_ctx;
-    return ggml_view_4d(ctx, cache, head_dim, n_embd_kv / head_dim, n_kv, 1,
-                        rs_head, rs_row, rs_slot, rs_slot * (size_t) slot);
+    return ggml_view_4d(ctx, slot_tensor, head_dim, n_embd_kv / head_dim, n_kv, 1,
+                        rs_head, rs_row, rs_row, 0);
 }
 
-static ggml_tensor * kv_write_view(ggml_context * ctx, ggml_tensor * cache, ggml_type type,
-                                   int n_embd_kv, int n_ctx, int slot, int n_past, int n_tokens) {
+// Flat write view of ONE slot tensor, positions [n_past, n_past + n_tokens):
+// [n_embd_kv, n_tokens]. Contiguous.
+static ggml_tensor * kv_write_view(ggml_context * ctx, ggml_tensor * slot_tensor, ggml_type type,
+                                   int n_embd_kv, int n_past, int n_tokens) {
     const size_t rs_row = ggml_row_size(type, n_embd_kv);
-    const size_t off    = ((size_t) slot * n_ctx + n_past) * rs_row;
-    return ggml_view_2d(ctx, cache, n_embd_kv, n_tokens, rs_row, off);
+    return ggml_view_2d(ctx, slot_tensor, n_embd_kv, n_tokens, rs_row, (size_t) n_past * rs_row);
 }
 
 bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
@@ -48,14 +50,23 @@ bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
         return false;
     }
 
-    ggml_init_params ip = { ggml_tensor_overhead() * 4 + 4096, nullptr, /*no_alloc=*/ true };
+    // M7a: 2 * n_slots tensors, each [n_embd_kv, n_ctx]. The allocator groups
+    // them into buffers at suballocation_block_size (1 GiB by default), so no
+    // single buffer approaches the Vulkan max_buffer_size limit.
+    ggml_init_params ip = { ggml_tensor_overhead() * (size_t)(2 * n_slots + 8) + 4096,
+                            nullptr, /*no_alloc=*/ true };
     kv.ctx = ggml_init(ip);
     if (!kv.ctx) { err = "kv cache: ggml_init failed"; return false; }
 
-    kv.k = ggml_new_tensor_3d(kv.ctx, type, kv.n_embd_kv, n_ctx, n_slots);
-    kv.v = ggml_new_tensor_3d(kv.ctx, type, kv.n_embd_kv, n_ctx, n_slots);
-    ggml_set_name(kv.k, "kv_cache.k");
-    ggml_set_name(kv.v, "kv_cache.v");
+    kv.k.resize(n_slots);
+    kv.v.resize(n_slots);
+    for (int s = 0; s < n_slots; ++s) {
+        kv.k[s] = ggml_new_tensor_2d(kv.ctx, type, kv.n_embd_kv, n_ctx);
+        kv.v[s] = ggml_new_tensor_2d(kv.ctx, type, kv.n_embd_kv, n_ctx);
+        char name[32];
+        std::snprintf(name, sizeof(name), "kv_cache.k[%d]", s); ggml_set_name(kv.k[s], name);
+        std::snprintf(name, sizeof(name), "kv_cache.v[%d]", s); ggml_set_name(kv.v[s], name);
+    }
 
     kv.buf = ggml_backend_alloc_ctx_tensors(kv.ctx, backend);
     if (!kv.buf) { err = "kv cache: backend allocation failed"; ouro_kv_cache_free(kv); return false; }
@@ -67,8 +78,8 @@ bool ouro_kv_cache_init(ouro_kv_cache & kv, ggml_backend_t backend,
 void ouro_kv_cache_free(ouro_kv_cache & kv) {
     if (kv.buf) { ggml_backend_buffer_free(kv.buf); kv.buf = nullptr; }
     if (kv.ctx) { ggml_free(kv.ctx);                 kv.ctx = nullptr; }
-    kv.k = nullptr;
-    kv.v = nullptr;
+    kv.k.clear();
+    kv.v.clear();
 }
 
 void ouro_kv_cache_clear(ouro_kv_cache & kv) {
@@ -80,17 +91,17 @@ void ouro_kv_cache_clear(ouro_kv_cache & kv) {
 }
 
 ggml_tensor * ouro_kv_k(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_kv) {
-    return kv_read_view(ctx, kv.k, kv.type, kv.head_dim, kv.n_embd_kv, kv.n_ctx, slot, n_kv);
+    return kv_read_view(ctx, kv.k[slot], kv.type, kv.head_dim, kv.n_embd_kv, n_kv);
 }
 
 ggml_tensor * ouro_kv_v(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_kv) {
-    return kv_read_view(ctx, kv.v, kv.type, kv.head_dim, kv.n_embd_kv, kv.n_ctx, slot, n_kv);
+    return kv_read_view(ctx, kv.v[slot], kv.type, kv.head_dim, kv.n_embd_kv, n_kv);
 }
 
 ggml_tensor * ouro_kv_k_write(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_past, int n_tokens) {
-    return kv_write_view(ctx, kv.k, kv.type, kv.n_embd_kv, kv.n_ctx, slot, n_past, n_tokens);
+    return kv_write_view(ctx, kv.k[slot], kv.type, kv.n_embd_kv, n_past, n_tokens);
 }
 
 ggml_tensor * ouro_kv_v_write(const ouro_kv_cache & kv, ggml_context * ctx, int slot, int n_past, int n_tokens) {
-    return kv_write_view(ctx, kv.v, kv.type, kv.n_embd_kv, kv.n_ctx, slot, n_past, n_tokens);
+    return kv_write_view(ctx, kv.v[slot], kv.type, kv.n_embd_kv, n_past, n_tokens);
 }

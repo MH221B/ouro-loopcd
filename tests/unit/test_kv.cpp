@@ -137,8 +137,8 @@ static void test_masked_attn() {
     // read the f16 K/V back, in the cache row layout: row for position p holds h*head_dim + d
     std::vector<ggml_fp16_t> kraw((size_t) kv.n_embd_kv * n_ctx * n_slots);
     std::vector<ggml_fp16_t> vraw((size_t) kv.n_embd_kv * n_ctx * n_slots);
-    ggml_backend_tensor_get(kv.k, kraw.data(), 0, ggml_nbytes(kv.k));
-    ggml_backend_tensor_get(kv.v, vraw.data(), 0, ggml_nbytes(kv.v));
+    ggml_backend_tensor_get(kv.k[0], kraw.data(), 0, ggml_nbytes(kv.k[0]));
+    ggml_backend_tensor_get(kv.v[0], vraw.data(), 0, ggml_nbytes(kv.v[0]));
 
     double max_d = 0.0;
     for (int i = 0; i < n; ++i) {

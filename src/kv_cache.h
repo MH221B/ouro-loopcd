@@ -4,6 +4,7 @@
 #include "ggml-backend.h"
 
 #include <string>
+#include <vector>
 
 // M6 Kitty-KV config. nullptr (or kitty=false) means the cache is a plain f16/q8_0 cache.
 struct ouro_kitty_config {
@@ -20,7 +21,7 @@ struct ouro_kitty_config {
 // The cached K/V for one logical layer occupies one slot, because K/V differ per loop.
 // Ouro has n_layer * n_loops slots (48 * 4 = 192); slot index = loop * n_layer + layer.
 //
-// Layout: `k` and `v` are each one [head_dim * n_head_kv, n_ctx, n_slots] tensor.
+// Layout: `k` and `v` are each `n_slots` tensors of [head_dim * n_head_kv, n_ctx].
 // One row of head_dim * n_head_kv contiguous values is the K (or V) for one token in
 // one slot, laid out head-major (element h*head_dim + d). The per-head read view splits
 // dim 0 into [head_dim, n_head_kv].
@@ -33,8 +34,11 @@ struct ouro_kv_cache {
     ggml_type type  = GGML_TYPE_Q8_0; // q8_0 (default), f16, or f32
     ggml_context * ctx = nullptr;     // owns the k/v tensor structs
     ggml_backend_buffer_t buf = nullptr; // owns the k/v data
-    ggml_tensor * k = nullptr;        // [n_embd_kv, n_ctx, n_slots]
-    ggml_tensor * v = nullptr;        // [n_embd_kv, n_ctx, n_slots]
+    // M7a: one tensor per slot, so the allocator can split the cache into
+    // buffers smaller than the Vulkan per-allocation limit. Each entry is
+    // [n_embd_kv, n_ctx]. See docs/superpowers/specs/2026-10-11-loopcd-m7-packed-kv-design.md §6.
+    std::vector<ggml_tensor *> k;     // n_slots tensors of [n_embd_kv, n_ctx]
+    std::vector<ggml_tensor *> v;     // n_slots tensors of [n_embd_kv, n_ctx]
 
     // M6: fake-quantize the f16 cache after each forward.
     bool kitty = false;              // valid when kitty == true
