@@ -56,6 +56,9 @@ both halves of the claim.
 | M3 | LoopCD, logits and hidden forms, fixed and adaptive ω, on by default | done |
 | M4 | OpenAI-compatible server: `/v1/chat/completions` streaming and non-streaming, `/v1/completions`, `/health`, `/v1/models` | done |
 | M5 | Measurement harness in `tests/eval/`, results in `tests/eval/RESULTS.md` | done |
+| M6 | Kitty-KV 2-bit cache as an f16 fake-quant, with a HuggingFace oracle go/no-go | done |
+| M7a | Per-slot KV allocation: lifts the ggml 2 GiB buffer and 4 GiB SSBO-range walls | done |
+| M7b/c | Packed 2-bit KV cache (Kitty's layout) plus `KITTY_QK`/`KITTY_SV` ops in a ggml fork | done |
 
 ## Measured results
 
@@ -107,23 +110,76 @@ A few things worth stating plainly, because the tables flatter the result:
 The full per-task tables, deltas, and the R=4 versus R=2 comparison are generated into
 [`tests/eval/RESULTS.md`](tests/eval/RESULTS.md) by `tests/eval/report.py`.
 
+## Packed 2-bit KV (M7)
+
+The KV cache is the dominant memory term at long context, so M7 replaces it with a packed
+2-bit cache: every channel at 2 bits, the most important *key* channels per page promoted to
+4 bits, and the sink plus the pending page kept in f16. It follows Kitty's layout
+([arXiv 2511.18643](https://arxiv.org/abs/2511.18643)) but not Kitty's Triton implementation.
+The two attention ops mirror its structure (QK, then SV, with softmax in between) and the
+kernels stream per-channel tiles instead of staging a full page.
+
+**Memory.** Measured committed memory of the server at context 4096: **3.16 GiB packed against
+5.19 GiB for q8_0** — 2.03 GiB less, 39%. Absolute figures include the model and the driver, so
+the delta is the meaningful number. The arithmetic behind it, about 2.53 bits per element
+against q8_0's 8.5, is corroborated by the measured increments.
+
+**Capacity.** M6 capped the cache at context 2048 and I had assumed that was a driver limit. It
+was not. ggml rejects any buffer over 2 GiB (`ggml-vulkan-buffers.cpp`), using a `maxBufferSize`
+the AMD driver advertises but does not enforce, and separately no tensor may exceed the 4 GiB
+SSBO range. Allocating one tensor per slot removes both walls, so **f16, q8_0 and the packed
+cache all run at context 8192 now**, with no override. The packed cache reaches furthest because
+its planes are small tensors.
+
+**Throughput is a regression, and it is reported rather than hidden.** Packed decode runs at
+about 5.6 tok/s on long generations at context 4096 against q8_0's 11.5. The cause is
+structural: decode is a single query, so the first-cut kernel gives only 16 workgroups on a
+16-CU iGPU. Split-K is the known fix and is not written. The packed cache buys memory and
+context, not speed.
+
+**How it is verified.** Against an independent reference, not against itself. The packed
+attention (`KITTY_QK` then `KITTY_SV`) reproduces a from-scratch dequantize-and-attend reference
+to 7.6e-10 on CPU and 5.5e-10 on Vulkan. The C++ emitter reproduces a Python oracle's packed
+bytes exactly. A cache-level check confirms the packed page's dequantized values differ from
+what the f16 mode stores by no more than fp16 rounding (2.44e-3 measured against a 9.96e-3
+bound), and that check is shown to fail when deliberately broken.
+
+**What is not claimed.** End-to-end packed-versus-f16 token agreement is **0.625**, not the 0.98
+I originally specified. That is not a storage or kernel defect: the two modes are different
+quantizations. The f16 mode stores `fp16(q*scale + min)`; the packed path dequantizes
+`q*fp16(scale) + fp16(min)` in f32. Their attention inputs therefore differ by about half an
+fp16 ulp per element, which is smaller than the quantization error itself. I recorded the
+number, left the threshold untouched, and moved enforcement to the checks above. The accuracy
+table is also a **reduced** condition set, one item per cell, so M7 has no task-accuracy
+measurement yet: it has six correct items and a memory win.
+
+**A correction to M6.** Chasing a server crash in the packed path turned up the fact that
+`ouro_kv_cache_clear` was never called, so the kitty cursors survived across requests and
+**every request after the first skipped quantization entirely**. M6's `kitty_shipping` table was
+measured with that bug, so its numbers are an upper bound rather than Kitty-on-Ouro; re-running
+it is outstanding. M6's oracle results, which were the go/no-go, never used the server and are
+unaffected. The M5 tables above are q8_0 and are unaffected too.
+
 ## Layout
 
 ```
-src/            engine: model loader, graph, KV cache, loopcd, tokenizer, chat template,
-                sampling, decode loop, server
-tools/          asset fetch, Ouro GGUF conversion, GGUF metadata check
+src/            engine: model loader, graph, KV cache (incl. the packed 2-bit path),
+                kitty packer, loopcd, tokenizer, chat template, sampling, decode loop, server
+tools/          asset fetch, Ouro GGUF conversion, GGUF metadata check,
+                ggml-kitty-ops.patch (the M7 delta applied to ggml)
 tests/
-  reference/    HuggingFace reference harness and numeric gate comparison
-  unit/         focused unit tests: ops, kv, loopcd math, sampling, tokenizer
-  eval/         M5 measurement harness: run_eval.py, score.py, report.py, items/, RESULTS.md
+  reference/    HuggingFace reference harness, numeric gate comparison, the kitty pack
+                fixture, and the packed-vs-f16 gate script
+  unit/         focused unit tests: ops, kv, loopcd math, sampling, tokenizer, cache
+                allocation, and the kitty pack / ops / equivalence checks
+  eval/         measurement harness: run_eval.py, score.py, report.py, items/, RESULTS.md
 third_party/    vendored cpp-httplib and nlohmann/json
 ```
 
 ## Build
 
-Needs CMake 3.20 or newer, a C++17 compiler, Ninja, and for the shipping backend the
-Vulkan SDK. CMake fetches and pins ggml.
+Needs CMake 3.20 or newer, a C++17 compiler, Ninja, git, and for the shipping backend the
+Vulkan SDK. CMake fetches and pins ggml, then applies one patch to it.
 
 ```sh
 # Vulkan, the shipping backend
@@ -134,6 +190,18 @@ cmake --build build-vk
 cmake -B build-cpu -G Ninja -DCMAKE_BUILD_TYPE=Release -DLOOPCD_VULKAN=OFF
 cmake --build build-cpu
 ```
+
+**One patch, and why.** M7's packed KV cache needs two ops, `KITTY_QK` and `KITTY_SV`, which
+ggml does not have at the pinned commit. Rather than maintain a fork of ggml, the delta lives in
+[`tools/ggml-kitty-ops.patch`](tools/ggml-kitty-ops.patch) — 723 lines across 12 files — and
+CMake applies it to the fetched tree with `PATCH_COMMAND`. Because the upstream commit is pinned,
+the patch is deterministic. The addition is a clean, general one (a packed-KV attention pair),
+so it is a reasonable candidate to send upstream, at which point the patch goes away.
+
+Offline or faster rebuilds: `-DFETCHCONTENT_SOURCE_DIR_GGML=<dir>` uses a local ggml checkout
+instead of fetching. That directory must be a **clean** checkout of the pinned commit — the
+patch is applied to whatever source directory is used, so an already-patched tree will fail the
+patch step.
 
 Fetch the model config and tokenizer, convert to GGUF, and quantize:
 
@@ -149,11 +217,13 @@ The quantize step needs the Ouro-aware build, which is [llama.cpp PR #29823](htt
 ## Run
 
 ```sh
-# one-shot generation
+# one-shot generation. `run` takes token ids, not text, so tokenize first:
+build-vk/loopcd tokenize -m models/ouro/ouro.Q4_K_M.gguf --text "Explain why the sky is blue."
+# then pass those ids with --tokens a,b,c (or --tokens-file f), e.g.
 build-vk/loopcd run -m models/ouro/ouro.Q4_K_M.gguf --device vulkan --kv-type q8_0 \
-    -p "Explain why the sky is blue." --loopcd logits --loopcd-omega 0.3
+    --tokens-file prompt.ids --max-tokens 256 --loopcd logits --loopcd-omega 0.3
 
-# server
+# server: text in, text out. This is the usual entry point.
 build-vk/loopcd serve -m models/ouro/ouro.Q4_K_M.gguf --device vulkan --kv-type q8_0 \
     --ctx 4096 --loopcd logits --port 8080
 ```
@@ -170,6 +240,11 @@ LoopCD modes are `off`, `logits`, and `hidden`. `--loopcd-adaptive` anneals ω u
 `--loopcd-omega-max`. `--loops N` sets the recurrent depth, default 4, which is what the
 model was trained at.
 
+`--kv-type` is `q8_0` (default), `f16`, `f32`, or `kitty`. `kitty` selects the packed 2-bit
+cache from M7; `--kitty-storage f16` selects M6's fake-quant instead. `--kitty-boost N` sets how
+many channels per page are promoted to 4 bits (`32` is 25%, `25` is 20%); `--kitty-sink N` sets
+the f16 sink length (default 32).
+
 ## Verification
 
 Correctness is a numeric gate against a pinned HuggingFace `transformers` f32 forward pass,
@@ -185,6 +260,12 @@ not a glance at the output.
 - Decode loop. A greedy continuation has to match HuggingFace token for token.
 - Unit tests cover the q8_0 KV round-trip against ggml, the LoopCD combine math, RoPE,
   RMSNorm, and the sandwich block against numpy, plus tokenizer and chat-template parity.
+- Packed KV. Checked against an independent reference rather than itself: the packed attention
+  reproduces a from-scratch dequantize-and-attend reference to 7.6e-10 on CPU and 5.5e-10 on
+  Vulkan; the C++ emitter reproduces a Python oracle's packed bytes exactly; and a cache-level
+  check confirms the packed page's dequantized values differ from what the f16 mode stores by no
+  more than fp16 rounding. That last check is shown to fail when deliberately broken, because a
+  test that cannot fail is not evidence.
 
 ## Limitations
 
@@ -192,8 +273,12 @@ not a glance at the output.
 - One request at a time. There is no batching, so one slow generation blocks the server.
 - Windows with Vulkan or CPU. No CUDA, no Metal.
 - The adaptive-depth and `early_exit_gate` path is out of scope.
-- Prefill is dense and runs the stack R times, so long prompts are slow. Keep `--ctx`
-  no larger than you need.
+- The packed 2-bit cache is about 2x slower than q8_0 on long generations. It buys memory and
+  context, not speed: the first-cut kernels have no split-K.
+- Packed-KV accuracy is smoke-tested only, one item per cell, so M7 has no task-accuracy claim
+  yet. It has a memory win and six correct items.
+- Prefill runs the stack R times. For `kitty` it is chunked at the page size, so long prompts
+  cost proportionally; the other KV types use one dense pass.
 
 ## References
 
