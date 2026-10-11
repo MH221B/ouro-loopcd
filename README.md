@@ -120,7 +120,7 @@ The two attention ops mirror its structure (QK, then SV, with softmax in between
 kernels stream per-channel tiles instead of staging a full page.
 
 **Memory.** Measured committed memory of the server at context 4096: **3.16 GiB packed against
-5.19 GiB for q8_0** — 2.03 GiB less, 39%. Absolute figures include the model and the driver, so
+5.19 GiB for q8_0**, which is 2.03 GiB less, 39%. Absolute figures include the model and the driver, so
 the delta is the meaningful number. The arithmetic behind it, about 2.53 bits per element
 against q8_0's 8.5, is corroborated by the measured increments.
 
@@ -160,6 +160,24 @@ measured with that bug, so its numbers are an upper bound rather than Kitty-on-O
 it is outstanding. M6's oracle results, which were the go/no-go, never used the server and are
 unaffected. The M5 tables above are q8_0 and are unaffected too.
 
+## The optimization I didn't do
+
+Packed decode runs about 2x slower than q8_0, and I never fixed it. It is the one piece of M7 I
+left unfinished, and I would rather hand it over than pretend it is fine.
+
+The short version: decode attention (`KITTY_SV`) launches 128 threads on a 16-CU GPU, and the
+host packer does a blocking device round-trip per slot, per token. Either could be the real
+cost, and nobody has profiled it. The fix is probably splitting the key axis on `KITTY_SV` and
+batching the packer, run at R=2 where the numbers get interesting.
+
+There is a roofline, so the expectations are set. The weights are re-read once per loop, which
+puts 60 tok/s out of reach at R>=2 no matter how good the kernels get. The target is 27 tok/s at
+R=2, about 5x today's packed number.
+
+The full design is in [optimization.md](optimization.md), including the gate and the rules for
+deciding which fixes are worth doing. If you want to take it on, that file is the spec. I would
+be glad to see it finished.
+
 ## Layout
 
 ```
@@ -175,6 +193,9 @@ tests/
   eval/         measurement harness: run_eval.py, score.py, report.py, items/, RESULTS.md
 third_party/    vendored cpp-httplib and nlohmann/json
 ```
+
+[optimization.md](optimization.md) at the repo root is the design for the unfinished packed-KV
+throughput work.
 
 ## Build
 
@@ -193,13 +214,13 @@ cmake --build build-cpu
 
 **One patch, and why.** M7's packed KV cache needs two ops, `KITTY_QK` and `KITTY_SV`, which
 ggml does not have at the pinned commit. Rather than maintain a fork of ggml, the delta lives in
-[`tools/ggml-kitty-ops.patch`](tools/ggml-kitty-ops.patch) — 723 lines across 12 files — and
+[`tools/ggml-kitty-ops.patch`](tools/ggml-kitty-ops.patch), 723 lines across 12 files, and
 CMake applies it to the fetched tree with `PATCH_COMMAND`. Because the upstream commit is pinned,
 the patch is deterministic. The addition is a clean, general one (a packed-KV attention pair),
 so it is a reasonable candidate to send upstream, at which point the patch goes away.
 
 Offline or faster rebuilds: `-DFETCHCONTENT_SOURCE_DIR_GGML=<dir>` uses a local ggml checkout
-instead of fetching. That directory must be a **clean** checkout of the pinned commit — the
+instead of fetching. That directory must be a **clean** checkout of the pinned commit, because the
 patch is applied to whatever source directory is used, so an already-patched tree will fail the
 patch step.
 
