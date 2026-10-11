@@ -1,5 +1,10 @@
 {
   "info": { "zR": 1000000000.0, "z1": 1000000000.0, "h1": 1000000000.0, "hR": 1000000000.0 },
   "enforce_argmax": [],
-  "_note": "M6 Kitty-KV numeric gate. Kitty is lossy by design, so magnitude is informational and the zR argmax agreement rate is reported as a number, not enforced (spec 8.2)."
+  "_note": "M6 Kitty-KV numeric gate (unchanged).",
+  "kitty_packed_vs_f16": {
+    "min_argmax_agreement": 0.98,
+    "max_abs_logit_delta": 0.001954,
+    "derived_from": "Task 5 measured max|d| = 0.000977 (C++ packed emitter vs the Python oracle fixture, tests/unit/test_kitty_pack.cpp); rule tol = max(2*measured, 1e-3) = 0.001954. Pre-registered BEFORE the gate was run; never relaxed after."
+  }
 }

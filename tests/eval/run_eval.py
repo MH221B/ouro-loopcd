@@ -45,6 +45,9 @@ def loopcd_for(condition, task):
 def start_server(exe, cfg, port, loops=0):
     cmd = [exe, "serve", "-m", cfg["model"], "--device", cfg["device"],
            "--kv-type", cfg["kv_type"], "--ctx", str(cfg.get("ctx", 1024)), "--port", str(port)]
+    if cfg.get("kitty_storage"):
+        cmd += ["--kitty-storage", cfg["kitty_storage"]]
+    cmd += cfg.get("extra_args", [])
     if loops > 0:
         cmd += ["--loops", str(loops)]
     print("+", " ".join(cmd))

@@ -238,3 +238,97 @@ config was likewise never run, for the same cost reason.)
 | logits_adaptive | 100.0% | 100.0% | +0.0 pts | 11.44 | 19.61 |
 | hidden | 100.0% | 100.0% | +0.0 pts | 10.19 | 18.59 |
 
+## Config `kitty_packed_shipping` - `models/ouro/ouro.Q4_K_M.gguf` on `vulkan`, KV `kitty` (packed 2-bit)
+
+**Reduced condition set** (`--limit 1 --conditions off,logits`), by measurement policy: a full
+config would be many hours — one math item alone is ~12 min at ~5.6 tok/s.
+
+| task | condition | n | accuracy | tokens | tok/s | s/item |
+|---|---|---|---|---|---|---|
+| math | off    | 1 | 100.0% | 4053 | 5.64 | 718.4 |
+| math | logits | 1 | 100.0% | 1036 | 7.52 | 137.8 |
+| mc   | off    | 1 | 100.0% | 186  | 9.25 | 20.1  |
+| mc   | logits | 1 | 100.0% | 215  | 9.23 | 23.3  |
+| gen  | off    | 1 | 100.0% | 4051 | 5.65 | 717.3 |
+| gen  | logits | 1 | 100.0% | 4051 | 5.63 | 719.9 |
+
+All six items scored correct. **n = 1 per task/condition** — this is a smoke-level accuracy
+signal, not a task-accuracy measurement, and it does not support an accuracy claim the way M6's
+table did.
+
+**Same-ctx only.** `kitty_packed_shipping` is ctx 4096; M6's `kitty_shipping` is ctx 2048 and
+`shipping` is ctx 4096. No cross-ctx A/B is implied.
+
+**Throughput (reported, not gated).** Packed decode at ctx 4096 is ~5.6 tok/s on long
+generations vs the q8_0 `shipping` baseline's ~11.5 (about 2x slower); short items ~9.2 vs
+~11.8 (about 1.3x). Cause: the first-cut kernel has no split-K — decode is `n_q = 1`, so a
+per-head scan yields only 16 workgroups on a 16-CU iGPU (spec §9). Attributed, not hidden.
+
+**Memory - measured.** Committed (Private) memory of the `serve` process after a request at
+ctx 4096: q8_0 **5.19 GiB** vs packed **3.16 GiB** - **2.03 GiB less (39%)**. The differential
+validates the metric: q8_0's 2048->4096 increment is 1.60 GiB and q8_0's KV at ctx 2048 is
+1.59 GiB; packed's increment is 0.47 GiB vs the 0.46 GiB the spec's arithmetic predicts.
+Absolute values include the model (~1.6 GB), the driver and compute buffers, so the *delta* is
+the meaningful figure. `WorkingSet64` is unusable on this UMA iGPU (it reports 0.08 GiB
+regardless of config); `PrivateMemorySize64` is what attributes the driver's allocations.
+
+## Kitty-KV packed (M7b/c) - summary
+
+**What was measured.** M7's packed 2-bit KV cache (Kitty's layout: 2-bit planes + per-page
+4-bit channel boost + fp16 metadata) served by `KITTY_QK -> SOFTMAX -> KITTY_SV`, on the
+shipping stack (Q4_K_M + Vulkan), plus the enforced equivalence checks below.
+
+**The §12.3 gate was re-scoped, not relaxed.** The original packed-vs-f16 gate assumed both
+modes realize the same quantization and differ only in storage. They do not: the f16 mode
+stores `fp16(q*scale_f32 + min_f32)`, while the packed mode dequantizes
+`q*fp16(scale) + fp16(min)` in f32. Measured packed-vs-f16 agreement is **0.625** (n=24) against
+the pre-registered threshold 0.98 / `max_abs_logit_delta` 0.001954 - which was fixed from the
+Task 5 measured `max|d| = 0.000977` *before* the gate ran and **never relaxed**. The enforced
+equivalence is now:
+
+- `kitty_ops` - packed `KITTY_QK/SOFT_MAX/KITTY_SV` vs an independent reference, CPU and Vulkan,
+  in a mixed state (`n_kpages >= 1 && n_kpending > 0`) with `n_q > 1`: **7.6e-10** CPU,
+  **5.5e-10** Vulkan.
+- `kitty_pack` - the C++ emitter reproduces the Python oracle's packed bytes and dequantized
+  values.
+- `kitty_equiv` - cache-level: the packed page's dequantized values vs what the f16 mode
+  *stores*, element-wise, within an analytic fp16-rounding bound: **2.44e-3 measured vs 9.96e-3
+  bound** (about one fp16 ulp at that value scale). Negative-controlled: disabling the high-bit
+  merge drives it to 4.0 and FAILs, so the check is live.
+
+**The amplification story was falsified by its own diagnostic.** packed-vs-f16 `max|dzR|` is
+**1.286 at `--loops 1`** and **1.203 at `--loops 4`** - flat, so the divergence is
+single-pass-dominated, not loop-amplified. (Consistent with M6's non-monotonic R data.) The
+interpretation rule was pre-registered before the numbers were seen.
+
+**Determinism.** Promotion tie-break is stable by (mean|k| desc, channel index asc) and both
+storage modes use a `double` score, so they select the same channels. RNG: seeded once at cache
+init and advanced per call - a deliberate change from M6's per-call reseed. Dequant is f32
+(deterministic), not Kitty's f16. Vulkan workgroup geometry is fixed (QK: 128-thread per 16-key
+block; SV: 8-thread per query/head).
+
+**Caveats (read before citing this).**
+- The accuracy table is a **reduced condition set with n = 1 per cell** - a smoke signal only.
+- Packed-vs-f16 end-to-end agreement is **0.625** and is reported, not enforced; the reason is a
+  documented premise error in the original gate, not a storage or kernel defect (spec §12.3).
+- Throughput is about 2x below the q8_0 baseline; the packed cache's justification is memory and
+  capacity, not speed.
+
+## M6 correction - the engine eval was measured on an unquantized cache
+
+**Finding.** `ouro_kv_cache_clear` was **never called** (zero call sites in `src/`), and
+`ouro_generator::begin` did not reset the cache, so the kitty cursors persisted across requests
+in `serve`. The f16 quantizer starts at `a = kv.kitty_k_done`, which was already past the next
+request's `n_kv`, so **every request after the first skipped quantization entirely** - i.e. ran
+against an effectively unquantized f16 cache. Fixed in `5437351` (clear per request). The packed
+path crashed on request 2 from the same missing reset (stale `kitty_k_pages` produced a negative
+`n_kpending` and an out-of-bounds view), which is how it surfaced.
+
+**Consequences for M6's recorded numbers.** The `## Kitty-KV (M6)` summary and the
+`kitty_shipping` table above were measured with that bug present, so for all but the first
+request per server run the 2-bit cache was **not applied**. Read those numbers as an upper
+bound, not as Kitty-on-Ouro. M6's **oracle** results (kitty vs f16 on HF; per-position agreement
+0.972/0.986 at R=4) are **unaffected** - no server involved - and the GO decision rested on
+them, so the algorithmic conclusion stands. M6's numeric gate (`cmd_logits`) is also unaffected
+(one process per run). **Re-running `kitty_shipping` with the fix is an open task.**
+

@@ -9,6 +9,9 @@
     { "name": "kitty_shipping", "model": "models/ouro/ouro.Q4_K_M.gguf", "device": "vulkan", "kv_type": "kitty", "ctx": 2048,
       "note": "M6 Kitty-KV 2-bit cache on the shipping stack. ctx 2048, NOT 4096: M6 stores f16 (the 2-bit win is M7), so one K/V tensor at ctx 4096 is 3.00 GiB and the Vulkan driver rejects a single allocation of that size (ErrorOutOfDeviceMemory); at ctx 2048 it is 1.5 GiB and fits. Default kernel flags: sink 32, page 128, boost 0.25, kbits/vbits 2, boost_bits 4." },
     { "name": "kitty_clean", "model": "models/ouro/ouro.f32.gguf", "device": "cpu", "kv_type": "kitty", "ctx": 1024,
-      "note": "M6 Kitty-KV on f32 weights + CPU. The low-noise condition; slow (~1 tok/s), so it is run with a reduced condition set." }
+      "note": "M6 Kitty-KV on f32 weights + CPU. The low-noise condition; slow (~1 tok/s), so it is run with a reduced condition set." },
+    { "name": "kitty_packed_shipping", "model": "models/ouro/ouro.Q4_K_M.gguf", "device": "vulkan", "kv_type": "kitty", "ctx": 4096,
+      "kitty_storage": "packed", "extra_args": ["--kitty-boost", "32"],
+      "note": "M7 packed 2-bit cache on the shipping stack, ctx 4096 (attempt 8192). Same boost count as kitty_shipping. Compare same-ctx only." }
   ]
 }
