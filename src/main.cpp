@@ -62,6 +62,12 @@ static bool parse_kitty_flags(int argc, char ** argv, ouro_kitty_config & c, std
         else if (a == "--kitty-boost-bits")   c.boost_bits     = atoi(arg_value(argc, argv, i).c_str());
         else if (a == "--kitty-random")       c.random_select  = true;
         else if (a == "--kitty-seed")         c.seed           = strtoull(arg_value(argc, argv, i).c_str(), nullptr, 10);
+        else if (a == "--kitty-storage") {
+            const std::string v = arg_value(argc, argv, i);
+            if      (v == "packed") c.packed = true;
+            else if (v == "f16")    c.packed = false;
+            else { err = "kitty: --kitty-storage must be 'f16' or 'packed'"; return false; }
+        }
     }
     if (c.kbits < 1 || c.kbits > 8 || c.vbits < 1 || c.vbits > 8 || c.boost_bits < c.kbits)
         { err = "kitty: bad bit widths"; return false; }
@@ -323,6 +329,11 @@ static int cmd_run(int argc, char ** argv) {
         else if (a == "--repeat-penalty")      repeat_penalty = (float) std::atof(arg_value(argc, argv, i).c_str());
         else if (a == "--repeat-last-n")       repeat_last_n = std::atoi(arg_value(argc, argv, i).c_str());
         else if (a == "--seed")                seed        = (uint32_t) std::strtoul(arg_value(argc, argv, i).c_str(), nullptr, 10);
+        else if (a.rfind("--kitty-", 0) == 0) {
+            // Parsed/validated by parse_kitty_flags(argc, argv, ...); skip it here.
+            // --kitty-random is the only kitty flag with no value.
+            if (a != "--kitty-random") { (void) arg_value(argc, argv, i); }
+        }
         else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
     }
     if (model_path.empty()) {
@@ -330,7 +341,7 @@ static int cmd_run(int argc, char ** argv) {
                         "[--device cpu|vulkan] [--kv-type q8_0|f16|f32|kitty] [--ctx N] [--loops N] "
                         "[--max-tokens N] [--eos N] [--dump-ids file] [--temp F] [--top-k N] [--top-p F] "
                         "[--repeat-penalty F] [--repeat-last-n N] [--seed N] "
-                        "[--kitty-sink N] [--kitty-page N] [--kitty-boost N] [--kitty-kbits N] [--kitty-vbits N] "
+                        "[--kitty-storage f16|packed] [--kitty-sink N] [--kitty-page N] [--kitty-boost N] [--kitty-kbits N] [--kitty-vbits N] "
                         "[--kitty-boost-bits N] [--kitty-random] [--kitty-seed N] "
                         "[--loopcd off|logits|hidden] [--loopcd-preset generation|reasoning|mc] "
                         "[--loopcd-omega F] [--loopcd-omega-max F] [--loopcd-adaptive] [--loopcd-ref N] "
@@ -521,12 +532,17 @@ static int cmd_serve(int argc, char ** argv) {
         else if (a == "--loopcd-omega")        { omega = (float) std::atof(arg_value(argc, argv, i).c_str()); omega_set = true; }
         else if (a == "--loopcd-omega-max")    { omega_max = (float) std::atof(arg_value(argc, argv, i).c_str()); omega_max_set = true; }
         else if (a == "--loopcd-ref")          loopcd_ref = std::atoi(arg_value(argc, argv, i).c_str());
+        else if (a.rfind("--kitty-", 0) == 0) {
+            // Parsed/validated by parse_kitty_flags(argc, argv, ...); skip it here.
+            // --kitty-random is the only kitty flag with no value.
+            if (a != "--kitty-random") { (void) arg_value(argc, argv, i); }
+        }
         else { fprintf(stderr, "error: unknown arg '%s'\n", a.c_str()); return 1; }
     }
     if (cfg.model_path.empty()) {
         fprintf(stderr, "usage: loopcd serve -m <model.gguf> [--device cpu|vulkan] [--kv-type q8_0|f16|f32|kitty] "
                         "[--ctx N] [--loops N] [--host H] [--port N] [--temp F] [--top-k N] [--top-p F] "
-                        "[--kitty-sink N] [--kitty-page N] [--kitty-boost N] [--kitty-kbits N] [--kitty-vbits N] "
+                        "[--kitty-storage f16|packed] [--kitty-sink N] [--kitty-page N] [--kitty-boost N] [--kitty-kbits N] [--kitty-vbits N] "
                         "[--kitty-boost-bits N] [--kitty-random] [--kitty-seed N] "
                         "[--repeat-penalty F] [--loopcd off|logits|hidden] [--loopcd-preset generation|reasoning|mc] "
                         "[--loopcd-omega F] [--loopcd-omega-max F] [--loopcd-adaptive] [--loopcd-ref N]\n");
