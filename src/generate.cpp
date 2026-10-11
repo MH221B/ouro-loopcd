@@ -28,6 +28,13 @@ bool ouro_generator::begin(ouro_model & model, ouro_kv_cache & cache, const std:
     first_z1.clear();
     rng.seed(gp.sampling.seed);
 
+    // Reset the KV cache for this request. Without this the kitty cursors
+    // (kitty_k_done / kitty_v_done / kitty_k_pages / kitty_v_packed / kitty_rng)
+    // survive across requests: the packed path then computes a negative n_kpending
+    // and aborts on an out-of-bounds view, and the f16 path silently skips
+    // quantizing (its cursor is already past n_kv). See the repro in the M7 plan.
+    ouro_kv_cache_clear(*kv);
+
     if (prompt.empty()) { err = "generator: empty prompt"; return false; }
     if ((int) prompt.size() >= ctx) { err = "generator: prompt does not fit the context"; return false; }
     if (kv->n_slots != m->hp.n_layer * R) { err = "generator: KV slots do not match n_layer * loops"; return false; }
