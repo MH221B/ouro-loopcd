@@ -80,7 +80,7 @@ def make_cache_class(model, head_dim):
             while a + PAGE <= T:
                 x = out[:, :, a:a + PAGE, :].permute(0, 1, 3, 2)      # [1,H,D,P]
                 dq = fake_quant_page(x[0], cfg["kbits"], BOOST_BITS, self.d_boosted)
-                out[:, :, a:a + PAGE, :] = dq.permute(1, 2, 0).unsqueeze(0)
+                out[:, :, a:a + PAGE, :] = dq.permute(0, 2, 1).unsqueeze(0)   # [H,D,P]->[1,H,P,D]
                 a += PAGE
                 done += 1
                 self.k_pages_quantized += 1
@@ -191,6 +191,16 @@ def main():
             base = baseline[pr["id"]]
             ids = base["ids"]
 
+            if name == "f16":
+                # baseline is the f16 run itself: self-consistency row, nothing to recompute
+                rec = {"id": pr["id"], "greedy_agree": len(base["toks"]), "greedy_n": len(base["toks"]),
+                       "first_flip": None, "k_pages": 0, "v_tokens": 0}
+                agg["greedy_agree"] += rec["greedy_agree"]
+                agg["greedy_total"] += rec["greedy_n"]
+                agg["first_flip"].append(None)
+                agg["per_prompt"].append(rec)
+                continue
+
             c = KittyUniversalCache(mode, n_slots)
             toks, _ = greedy(model, ids, c, args.max_new)
             kp, vt = c.k_pages_quantized, c.v_tokens_quantized
@@ -204,7 +214,7 @@ def main():
             rec = {"id": pr["id"], "greedy_agree": agree, "greedy_n": n,
                    "first_flip": first_flip, "k_pages": kp, "v_tokens": vt}
 
-            if not args.no_teacher and name != "f16":
+            if not args.no_teacher:
                 c = KittyUniversalCache(mode, n_slots)
                 am, dmax, dmean = teacher(model, ids, c, base["toks"], base["vecs"])
                 kp2, vt2 = c.k_pages_quantized, c.v_tokens_quantized
@@ -224,7 +234,6 @@ def main():
             agg["greedy_agree"] += agree
             agg["greedy_total"] += n
             agg["first_flip"].append(first_flip)
-            agg["k_pages"] += 0 if agg["k_pages"] else 0
             agg["per_prompt"].append(rec)
             del toks; gc.collect()
 
