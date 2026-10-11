@@ -120,6 +120,11 @@ target_include_directories(test_kitty_ops PRIVATE src)
 target_link_libraries(test_kitty_ops PRIVATE ggml::ggml)
 add_test(NAME kitty_ops COMMAND test_kitty_ops)
 
+add_executable(test_kitty_equiv tests/unit/test_kitty_equiv.cpp src/kv_cache.cpp src/kitty_kv.cpp)
+target_include_directories(test_kitty_equiv PRIVATE src)
+target_link_libraries(test_kitty_equiv PRIVATE ggml::ggml)
+add_test(NAME kitty_equiv COMMAND test_kitty_equiv)
+
 add_executable(test_tokenizer tests/unit/test_tokenizer.cpp src/tokenizer.cpp src/unicode.cpp src/unicode-data.cpp)
 target_include_directories(test_tokenizer PRIVATE src)
 target_link_libraries(test_tokenizer PRIVATE ggml::ggml)
