@@ -1,0 +1,8 @@
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryTextColor':'#1f2328','primaryBorderColor':'#57606a','lineColor':'#57606a','edgeLabelBackground':'#ffffff','fontFamily':'Segoe UI, Helvetica, Arial, sans-serif','fontSize':'16px'}}}%%
+flowchart LR
+    Q["Q<br/>f32, the current token"] --> QK["KITTY_QK"]
+    K["K<br/>f16 sink + packed planes + f16 pending"] --> QK
+    QK --> SM["SOFT_MAX"]
+    SM --> SV["KITTY_SV"]
+    V["V<br/>f16 sink + packed planes + f16 pending"] --> SV
+    SV --> OUT["output<br/>f32, per head"]

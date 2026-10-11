@@ -1,0 +1,9 @@
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryTextColor':'#1f2328','primaryBorderColor':'#57606a','lineColor':'#57606a','edgeLabelBackground':'#ffffff','fontFamily':'Segoe UI, Helvetica, Arial, sans-serif','fontSize':'16px'}}}%%
+flowchart LR
+    A["prompt tokens"] --> B["prefill: ouro_forward_kv<br/>the whole prompt, R x 48 layers"]
+    B --> C["taps: zR, z1, h1, hR, g1, gR"]
+    C --> D["LoopCD combine<br/>z' = z_R + omega * (z_R - z_1)"]
+    D --> E["sample"]
+    E --> F["one token out"]
+    F --> G["decode: ouro_forward_kv<br/>one token, R x 48 layers"]
+    G --> C

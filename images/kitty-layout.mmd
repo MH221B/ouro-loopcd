@@ -1,0 +1,10 @@
+%%{init: {'theme':'base','themeVariables':{'primaryColor':'#ffffff','primaryTextColor':'#1f2328','primaryBorderColor':'#57606a','lineColor':'#57606a','edgeLabelBackground':'#ffffff','fontFamily':'Segoe UI, Helvetica, Arial, sans-serif','fontSize':'16px'}}}%%
+flowchart TB
+    subgraph SLOT["one slot: the K cache for one loop and one layer"]
+        direction LR
+        SINK["sink<br/>first 32 tokens<br/>f16, exact"] --> PAGES["packed pages<br/>2 bits per channel<br/>128 tokens each"] --> PEND["pending page<br/>f16 until it fills"]
+    end
+    subgraph PAGE["one packed page, per head = 5760 bytes"]
+        direction LR
+        LOW["low plane, 4096 B<br/>2 bits, all 128 channels"] --> HIGH["high plane, 1024 B<br/>2 extra bits, the 32 boosted"] --> IDX["idx, 128 B<br/>1 byte per channel"] --> META["meta, 512 B<br/>fp16 scale and min"]
+    end

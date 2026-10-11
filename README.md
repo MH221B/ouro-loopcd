@@ -64,6 +64,8 @@ loopcd serve                      src/server.cpp      OpenAI-compatible HTTP
       detokenize                  src/tokenizer.cpp
 ```
 
+![The decode pipeline. Prefill runs the whole prompt. Each step returns the taps, LoopCD combines them, and the engine samples one token.](images/decode-flow.png)
+
 The graph returns six taps at once: `zR`, `z1`, `h1`, `hR`, `g1`, `gR`. LoopCD is a short step
 after the graph. It is not a second forward pass.
 
@@ -143,9 +145,13 @@ The KV cache is the largest memory term at long context. M7 replaces it with a p
 cache. Every channel is stored at 2 bits. The most important key channels in each page are
 promoted to 4 bits. The sink and the pending page stay in f16.
 
+![One slot of the K cache, and the four parts of one packed page.](images/kitty-layout.png)
+
 The layout follows Kitty ([arXiv 2511.18643](https://arxiv.org/abs/2511.18643)), but not Kitty's
 Triton implementation. The two attention ops mirror Kitty's structure: QK, then softmax, then SV.
 The kernels read the packed data in per-channel tiles. They do not stage a full page.
+
+![The attention path over the packed cache. The two ops read the packed planes and the f16 sink directly, so the engine never builds an f16 copy of the whole cache.](images/kitty-attention.png)
 
 Memory, measured as committed memory of the server at context 4096:
 
