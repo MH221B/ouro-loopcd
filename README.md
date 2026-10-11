@@ -1,4 +1,4 @@
-# loopcd
+# loopcd + kitty
 
 loopcd is an inference engine for one model, Ouro-2.6B-Thinking. It is written in C++ and runs on
 ggml. The shipping backend is Vulkan, on one AMD Radeon 890M iGPU. The engine serves an
