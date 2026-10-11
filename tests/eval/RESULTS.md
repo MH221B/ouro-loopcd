@@ -102,6 +102,108 @@ Paper reference (HumanEval base pass@1 (Ouro-2.6B), Table 1(b)): off=75.61%, log
 **Reading this config:** The `hidden` row is expected to be degenerate; only the `logits` rows support a claim about the shipping stack.
 
 
+## Kitty-KV (M6) — summary
+
+**What was measured.** `kitty` is Kitty's 2-bit fake-quantized KV cache (sink 32, page 128,
+channel-wise boost ratio 0.25, `kbits`/`vbits` 2, `boost_bits` 4), ported into loopcd and
+verified element-for-element against the HuggingFace oracle. **The M6 cache is stored f16 and
+saves no memory.** The memory figure in the spec (key+value ≈ 2.53 bits/element ≈ 6.3× vs
+f16) is the **projected M7 packed-cache size**, not something M6 realizes.
+
+**Memory (projected, not realized).** Spec §4.4 arithmetic: key ≈ 2.81 bits/element,
+value ≈ 2.25 bits/element, key+value ≈ 2.53 bits/element → ≈ 6.3× smaller than f16 and
+≈ 3.4× smaller than q8_0. This is the M7 packed-cache projection; M6's actual resident cache
+is f16 and equals the f16 row.
+
+**Coverage / caveats (read before the tables).**
+- `kitty_clean` (f32 weights, CPU) was **NOT run**, by explicit project policy (no f32 runs /
+  no multi-hour runs). M6's clean low-noise condition is absent **by decision, not by
+  failure** — nothing below implies it ran.
+- `kitty_shipping` is **ctx 2048**, while the `shipping` baseline is **ctx 4096**: this is a
+  per-ctx observation, not a straight A/B at 4096. The ctx was reduced because a ctx-4096
+  kitty cache is f16 → one K/V tensor is 3.00 GiB and the Vulkan driver rejects a single
+  allocation that large (`ErrorOutOfDeviceMemory`); at ctx 2048 it is 1.5 GiB and fits. The
+  memory win that would make 4096 viable is M7's.
+- The oracle's K-dequant scatter bug (fixed in commit `3d76f4f`) was **already applied when the
+  R=4/R=2 gate was run**: the buggy version raises a size-mismatch `RuntimeError` the moment a
+  page completes, so `kitty.r4.json`/`kitty.r2.json` could not have been produced by it. The
+  reported numbers are valid; only the fix commit landed after the run.
+
+**Accuracy (kitty_shipping vs the q8_0 `shipping` baseline; different ctx — see caveat).**
+
+| task | condition | kitty acc (ctx 2048) | q8_0 acc (ctx 4096) |
+|---|---|---|---|
+| math | off / logits / logits_adaptive / hidden | 100% all | 100% all |
+| mc | off | 80% | 80% |
+| mc | logits | 80% | 100% |
+| mc | logits_adaptive | 100% | 100% |
+| mc | hidden | 100% | 100% |
+| gen | all | 100% | 100% |
+
+The only difference is one MCQ item under `logits` (80% vs 100%) — one item is 20 points on
+this set, inside the noise floor M5 already documents. No accuracy collapse from the 2-bit KV.
+
+**LoopCD-Hidden (d).** It did **not** collapse to a repeating token on kitty_shipping (math
+100%, mc 100%, gen 100%), but the gen `hidden` outputs were very short (59 tokens total for 2
+items vs ~1100 for `off`) — the same short-circuit behaviour M5 saw. Reported as an
+observation, not a win.
+
+**R=4 vs R=2.** The engine eval ran R=4 only. The recurrent-depth comparison comes from the
+oracle: `kitty`/`kitty20` teacher-forced per-position zR agreement is 0.972/0.986 at R=4 and
+0.972/0.931 at R=2 (vs 0.812/0.750 for raw 2-bit `kivi2`) — the loop does not break the
+boosted 2-bit cache.
+
+
+## Config `kitty_shipping` - `models/ouro/ouro.Q4_K_M.gguf` on `vulkan`, KV `kitty`
+
+
+### math
+
+| condition | n | accuracy | delta vs off | tokens | tok/s | s/item |
+|---|---|---|---|---|---|---|
+| off | 4 | 100.0% |  | 3703 | 9.34 | 99.1 |
+| logits | 4 | 100.0% | +0.0 pts | 3209 | 10.45 | 76.7 |
+| logits_adaptive | 4 | 100.0% | +0.0 pts | 4030 | 10.18 | 99.0 |
+| hidden | 4 | 100.0% | +0.0 pts | 3313 | 9.47 | 87.5 |
+
+Paper reference (AIME 2024 pass@1, 30 problems x 16 samples (Ouro-2.6B-Thinking)): off=61.88%, logits=70.62%, logits_adaptive=73.33%.
+
+
+### mc
+
+| condition | n | accuracy | delta vs off | tokens | tok/s | s/item |
+|---|---|---|---|---|---|---|
+| off | 5 | 80.0% |  | 708 | 10.77 | 13.1 |
+| logits | 5 | 80.0% | +0.0 pts | 198 | 10.20 | 3.9 |
+| logits_adaptive | 5 | 100.0% | +20.0 pts | 46 | 8.00 | 1.2 |
+| hidden | 5 | 100.0% | +20.0 pts | 166 | 9.12 | 3.6 |
+
+Paper reference (seven-benchmark mean (Ouro-2.6B), Table 2): off=baseline, logits=+0.84 pts, logits_adaptive=+0.95 pts.
+
+
+### gen
+
+| condition | n | accuracy | delta vs off | tokens | tok/s | s/item |
+|---|---|---|---|---|---|---|
+| off | 2 | 100.0% |  | 1094 | 10.36 | 52.8 |
+| logits | 2 | 100.0% | +0.0 pts | 843 | 10.58 | 39.8 |
+| logits_adaptive | 2 | 100.0% | +0.0 pts | 1631 | 9.31 | 87.6 |
+| hidden | 2 | 100.0% | +0.0 pts | 59 | 9.31 | 3.2 |
+
+Paper reference (HumanEval base pass@1 (Ouro-2.6B), Table 1(b)): off=75.61%, logits=77.44%, logits_adaptive=79.88%.
+
+
+**Reading this config:** The `hidden` row is expected to be degenerate; only the `logits` rows support a claim about the shipping stack.
+
+
+## Config `kitty_clean`
+
+**NOT RUN — by explicit project policy (no f32 runs / no multi-hour runs).** On f32 weights +
+CPU this needs roughly 15–20 minutes per math item and would run for hours. M6's clean
+low-noise condition is therefore absent **by decision, not by failure**. (The M5 `f32_clean`
+config was likewise never run, for the same cost reason.)
+
+
 ## R=4 vs R=2 (halved recurrent depth, shipping stack)
 
 `--loops 2` halves the recurrent depth - the paper's compute-saving regime, where LoopCD is meant to recover the accuracy lost to the halving. Same items, same conditions; the `tok/s` columns show the speed change directly.
