@@ -259,6 +259,11 @@ table did.
 **Same-ctx only.** `kitty_packed_shipping` is ctx 4096; M6's `kitty_shipping` is ctx 2048 and
 `shipping` is ctx 4096. No cross-ctx A/B is implied.
 
+**Capacity (smoke-tested, not evaluated).** `--ctx 8192` runs for the packed cache, and for
+`f16` and `q8_0` as well, all with **no allocation override** — M7a's per-slot split lifted the
+4 GiB SSBO-range wall as well as ggml's 2 GiB guard. M6's ctx-2048 cap is gone; 4096 is no
+longer the ceiling for any storage mode.
+
 **Throughput (reported, not gated).** Packed decode at ctx 4096 is ~5.6 tok/s on long
 generations vs the q8_0 `shipping` baseline's ~11.5 (about 2x slower); short items ~9.2 vs
 ~11.8 (about 1.3x). Cause: the first-cut kernel has no split-K — decode is `n_q = 1`, so a
